@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "astrbot": {
+    "repository": "https://github.com/AstrBotDevs/AstrBot.git",
+    "tag": "v4.29.1",
+    "commit": "dffe922773725e9c178392c423676ad65044748c",
+    "license": "AGPL-3.0-or-later",
+    "source_archive_sha256": "2f1e6d26d092a432ba7d85b9dd53a5adc43ac76bc54f598cc670ebe0408be86b"
+  },
+  "container": {
+    "base_image": "python:3.12-slim-bookworm@sha256:34386ef0cb081344d7ec1c103ba398e6e9f64e9ab3a1509accc92a4e24a07258",
+    "platform": "linux/amd64",
+    "image": "qq-ai-companion:phase1",
+    "user": "10001:10001"
+  },
+  "dependencies": {
+    "lock": "lockfiles/astrbot-requirements.txt",
+    "sha256": "185f02cd0a87bb512ffe61032451cdf5ed1892fe3e7871fb01e367c17488c555",
+    "build_lock": "lockfiles/build-tools.txt",
+    "build_lock_sha256": "b12d08875b4f472d5263d5a984f2c24b3866ae71fbedebf674dce817e228861f",
+    "resolver": "uv 0.12.23",
+    "python": "3.12",
+    "upstream_lock_present": false,
+    "compatibility_input": "lockfiles/plugin-compatibility.in"
+  }
+}

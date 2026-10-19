@@ -1,0 +1,40 @@
+{
+  "schema_version": 1,
+  "scope": "Original source, local offline evaluation only; no source vendoring or redistribution",
+  "identity_status": "Repositories specified by user in the full Phase 1 specification; pinned commits independently audited",
+  "plugins": [
+    {
+      "id": "message_recorder",
+      "directory": "astrbot_plugin_message_recorder",
+      "repository": "https://github.com/leafliber/astrbot_plugin_message_recorder.git",
+      "commit": "8cb184e2890dee7d5031d3a8ef6b753209dc7d11",
+      "metadata_version": "0.0.4",
+      "license": "GPL-3.0 (LICENSE); README inconsistently claims AGPL-3.0",
+      "license_status": "Conflicting notices: redistribution requires clarification and applicable obligations",
+      "astrbot_version": ">=4.16,<5",
+      "source_tree_sha256": "1e998eb4ba15ee20414828661b18b502266eba0e5475da928698bbb40201f830"
+    },
+    {
+      "id": "memory_companion",
+      "directory": "astrbot_plugin_memory_companion",
+      "repository": "https://github.com/menglimi/astrbot_plugin_memory_companion.git",
+      "commit": "e40a83005b0a2e0817e5680c7d14398c9ab49790",
+      "metadata_version": "2.3.1",
+      "license": null,
+      "license_status": "No project license found; local unchanged evaluation only; redistribution blocked",
+      "astrbot_version": ">=4.22.0",
+      "source_tree_sha256": "436147732fce123ddf1a61efb5add56e2f95867b19f319b0d23d82534db7aaa6"
+    },
+    {
+      "id": "private_companion",
+      "directory": "astrbot_plugin_private_companion",
+      "repository": "https://github.com/menglimi/astrbot_plugin_private_companion.git",
+      "commit": "da953559f34d28a43d8a2d44c1064b293229c1b8",
+      "metadata_version": "6.7.0",
+      "license": null,
+      "license_status": "No project license found; local unchanged evaluation only; redistribution blocked",
+      "astrbot_version": ">=4.22.0",
+      "source_tree_sha256": "e69f2fb6b9272ad74215550d8ea9c43d17fdc9ac231c5a2d084cdf2dfde31300"
+    }
+  ]
+}

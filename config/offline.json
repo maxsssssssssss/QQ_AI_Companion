@@ -1,0 +1,27 @@
+{
+  "config_version": 5,
+  "phase1": {"mode": "offline", "mock_self_id": 90000, "paths": {"data_dir": "data", "persona_dir": "persona", "plugin_lock": "config/plugins-lock.json"}, "plugins": ["message_recorder", "memory_companion", "private_companion"]},
+  "dashboard": {"enable": false},
+  "platform": [{"id": "offline", "type": "aiocqhttp", "enable": true, "ws_reverse_host": "127.0.0.1", "ws_reverse_port": 6199, "ws_reverse_token": "offline-fixture-token-not-a-secret"}],
+  "platform_settings": {
+    "unique_session": true,
+    "enable_id_white_list": true,
+    "id_whitelist": ["offline:FriendMessage:10001", "offline:FriendMessage:10002", "20001", "20002"],
+    "wl_ignore_admin_on_group": false,
+    "wl_ignore_admin_on_friend": false,
+    "reply_with_mention": false,
+    "reply_with_quote": false,
+    "rate_limit": {"time": 60, "count": 100, "strategy": "discard"}
+  },
+  "provider_sources": [{"id": "mock", "provider": "openai", "type": "openai_chat_completion", "provider_type": "chat_completion", "enable": true, "key": ["offline-fixture-key-not-a-secret"], "api_base": "http://127.0.0.1:18080/v1", "timeout": 5, "proxy": ""}],
+  "provider": [{"id": "mock/phase1", "provider_source_id": "mock", "model": "phase1-mock", "enable": true}],
+  "provider_settings": {"enable": true, "streaming_response": false, "datetime_system_prompt": false, "web_search": false, "computer_use_runtime": "none", "proactive_capability": {"add_cron_tools": false}},
+  "agent_runner": {"runner_type": "local", "config": {"model": {"provider_id": "mock/phase1", "fallback_provider_ids": [], "request_max_retries": 0}, "persona": {"persona_id": "offline", "safety_mode": true, "safety_mode_strategy": "system_prompt"}, "misc": {"max_steps": 3, "tool_call_timeout": 5}}},
+  "admins_id": [],
+  "wake_prefix": ["/"],
+  "plugin_set": ["*"],
+  "disable_metrics": true,
+  "log_level": "INFO",
+  "t2i": false,
+  "timezone": "Asia/Shanghai"
+}

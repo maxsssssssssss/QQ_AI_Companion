@@ -1,0 +1,9 @@
+name: phase1_guard
+display_name: Phase 1 Offline Guard
+desc: Durable duplicate rejection and observed single text delivery for synthetic acceptance.
+version: 0.1.0
+author: QQ AI Companion contributors
+repo: https://github.com/maxsssssssssss/QQ_AI_Companion
+support_platforms:
+  - aiocqhttp
+astrbot_version: ">=4.29.1,<4.30"

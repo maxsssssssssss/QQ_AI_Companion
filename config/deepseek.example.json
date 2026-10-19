@@ -1,0 +1,11 @@
+{
+  "_documentation_only": "Phase 2 template. Not loaded by the offline launcher. Verify official model IDs and supply credentials securely before enabling.",
+  "provider_sources": [
+    {"id": "deepseek", "provider": "openai", "type": "openai_chat_completion", "provider_type": "chat_completion", "enable": false, "api_base": "https://api.deepseek.com/v1", "key": [], "timeout": 60, "proxy": ""}
+  ],
+  "provider": [
+    {"id": "deepseek/primary", "provider_source_id": "deepseek", "model": "REPLACE_WITH_OFFICIALLY_VERIFIED_MODEL_ID", "enable": false}
+  ],
+  "requested_models_not_verified_online": ["deepseek-flash", "deepseek-v4-pro"],
+  "timezone": "Asia/Shanghai"
+}

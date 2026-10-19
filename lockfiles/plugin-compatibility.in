@@ -1,0 +1,7 @@
+# Additional declared requirements of the pinned companion plugin candidates.
+# Keep these independent of immutable upstream source files.
+aiohttp>=3.9,<4
+Pillow>=11.2.1,<13
+chinese-calendar>=1.9.2
+lunarcalendar>=0.0.9
+markdown-it-py>=3,<5

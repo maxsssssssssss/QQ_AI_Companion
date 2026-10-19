@@ -1,0 +1,7 @@
+{
+  "send_timeout_seconds": {
+    "type": "float",
+    "description": "Offline single text send timeout; timeout is unknown and never automatically retried.",
+    "default": 2.0
+  }
+}

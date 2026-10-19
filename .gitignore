@@ -1,0 +1,17 @@
+.runtime/
+__pycache__/
+*.pyc
+.venv/
+.env
+.env.*
+!.env.example
+/evidence/
+data/
+*.db
+*.db-wal
+*.db-shm
+*.sqlite*
+/backups/
+/napcat/
+/ntqq/
+*.log

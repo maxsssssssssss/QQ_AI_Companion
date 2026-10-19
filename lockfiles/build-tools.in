@@ -1,0 +1,5 @@
+# Bootstrap tools used to consume the committed artifact-hash locks.
+uv==0.12.23
+# jieba 0.42.1 imports pkg_resources, removed in setuptools 81.
+setuptools<81
+wheel
