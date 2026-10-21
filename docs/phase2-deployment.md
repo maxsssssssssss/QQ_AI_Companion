@@ -1,160 +1,149 @@
-# Phase 2 部署交接草案（未执行）
+# Phase 2 本地接管与私有 VPS 部署
 
-本文仅交接未来部署步骤。Phase 1 没有购买/部署 VPS、启动真实 QQ 协议端、扫码登录、调用真实 DeepSeek 或接触真实聊天记录。本文件不是生产验收报告；开始以下操作前须有用户进入 Phase 2 的明确指令，并解决 [`dependencies.md`](dependencies.md) 中与实际使用方式相关的许可和联网阻塞。
+用户已授权本轮常规部署、初始化和受控测试；真实 API Key 必须由用户通过受保护界面输入，QQ 扫码由账号持有人完成。实际状态见 [phase2-validation.md](phase2-validation.md)，不能把以下操作说明当作验收通过。原 Phase 1 提交、框架、插件和锁文件保持不变。
 
-## 建议资源与预算
+## 当前运行边界
 
-| 方案 | 建议用途 | 资源 | 预算规划 |
-| --- | --- | --- | --- |
-| 最低试运行 | 单账号、低并发、纯文本，不开本地向量/图片模型 | 2 vCPU、4 GiB RAM、40–60 GiB SSD、可用的 HTTPS 出站 | 约 30–80 元/月，通常依赖年付或活动价 |
-| 推荐 | AstrBot、一个 QQ 协议端、三个插件、日志与备份余量 | 2–4 vCPU、8 GiB RAM、60–100 GiB SSD | 约 80–150 元/月 |
+- 目标为 Ubuntu 24.04 x86_64、2 vCPU、约 4 GB RAM、60 GB SSD 的腾讯云 Lighthouse；4 GB 仅按低并发单账号试运行，不加载本地 embedding/大模型。
+- 本地环境为 Windows + WSL2；SSH/SCP 使用 Windows OpenSSH，身份由既有 Windows PEM 提供，私钥不进入 WSL、仓库或服务器。ACL 限制读取，禁止输出内容。
+- SSH 别名为 `qq-companion-vps`，强制 `StrictHostKeyChecking=yes`、仅 publickey、不转发 agent。用户从腾讯云控制台核对 ED25519 指纹后才完成首次信任。
+- 服务器原有 SSH 端口和认证方式不改；涉及重启、可能失联、重要数据删除、额外购买和扩大账号权限的操作仍单独请求用户。
+- 普通私聊白名单仅在运行配置中保存。群聊、主动消息、自动日程、联网搜索、计算机/文件操作、流式和分段回复暂关闭。
 
-这是资源与预算估算，不是实时商家报价；DeepSeek API、备份存储和额外流量另计。使用 x86_64 Linux（Ubuntu 24.04 LTS 或 Debian 12），以匹配本项目已验证的 linux/amd64 构建。4 GiB 方案先观察实际 RSS 和 swap；不要同时加载本地 embedding/大模型。地区按 QQ、DeepSeek 的真实网络可达性与账号使用要求选择，不根据离线测试推定可达。
+## 固定版本与来源
 
-## Phase 2 开始前
+| 组件 | 固定来源 |
+| --- | --- |
+| 项目 Phase 1 | `0b6bbf147a83f3e17c598c7a4d49386b6553c823` |
+| AstrBot | 4.29.1 / `dffe922773725e9c178392c423676ad65044748c` |
+| AstrBot 官方 amd64 基础 | `soulter/astrbot@sha256:0c3b8ef7485dbd15176637133c23dfbdb80675d174545a997648b9c1db7d53c1` |
+| Message Recorder | 0.0.4 / `8cb184e2890dee7d5031d3a8ef6b753209dc7d11` |
+| MemoryCompanion | 2.3.1 / `e40a83005b0a2e0817e5680c7d14398c9ab49790` |
+| PrivateCompanion | 6.7.0 / `da953559f34d28a43d8a2d44c1064b293229c1b8` |
+| NapCat | 4.18.38 / 原始官方 Shell ZIP SHA256 `735f2e633247df3ffd6e8ee8b84d7039c315b2655f5807e5f0029f93d2c30016` |
+| NapCat 官方容器基础 | 4.18.37 / `mlikiowa/napcat-docker@sha256:132448a544ed5cfa948dff8ae19e80bf4e17896e8ab2ba1c6cbcd86f8ad3e56e` |
+| QQ Linux | 官方基础镜像内 `3.2.34-53644`，通过 dpkg-query 实测 |
+| Python / Python 依赖 | 3.12.15；原 `lockfiles/astrbot-requirements.txt`、`build-tools.txt` 共 152 个去重运行/构建包及原始哈希 |
 
-1. 用户明确授权真实账号、服务器与 API 调用范围，指定备用测试 QQ 与授权的主账号私聊身份；本项目不要求群聊。
-2. 选择 NapCat 或 SnowLuma 中一个协议端，复核当前版本、QQ 客户端兼容范围、授权条件与发行包校验。不同时启用两个进程竞争同一账号。
-3. 放行必要的官方目的域名，至少核对 `api-docs.deepseek.com`、`api.deepseek.com` 和实际发行包下载域名；保留 TLS 验证。
-4. 从 [DeepSeek 官方文档](https://api-docs.deepseek.com/) 再确认 `deepseek-flash`、`deepseek-v4-pro` 的当日有效名称、API base 和计费；本轮未完成该核实，不自行换成近似 ID。
-5. 通过服务器安全配置供应密钥，不把 key、QQ 登录态、二维码或 OneBot token 提交到 Git、聊天或测试证据。
+没有可用的官方 NapCat 4.18.38 Docker tag，因此在固定 4.18.37 容器基础中替换为未经改动的 4.18.38 官方 ZIP。该镜像是本服务器私有派生镜像，不宣称上游发布过这个 tag，不公开发布第三方插件源码或派生镜像。插件仍按原上游依赖安装，许可限制继续见 [dependencies.md](dependencies.md)。
 
-## 先复验本项目离线基线
+AstrBot 官方 v4.29.1 基础镜像的 512 个 Python 文件与固定源码一致，但其 Python 依赖不完全等于 Phase 1 锁。生产 Dockerfile 使用原锁和哈希校正，再执行 pip check、152 包版本核验和源码比对。它运行官方 `main.py`，不使用 Phase 1 离线 harness。
 
-在已安装 Docker Engine / Compose 插件、Git 和 Python 3.12 的服务器工作目录中执行。项目仓库使用独立 checkout；不要将生产数据目录指向测试 `.runtime/runs/`。
+## 主机初始化
+
+`scripts/phase2-provision.sh` 针对经检查的现有 Ubuntu 主机执行普通软件更新，使用现有签名 Ubuntu APT 源安装 Git、docker.io、Compose/Buildx 插件，设置 Shanghai 时区、部署目录和 Docker 日志轮转。没有运行来源不明的远程安装脚本。
+
+执行升级前保留第二条 SSH 管理连接，并在升级后检查 ssh.service、sshd -t 和新连接。本次 OpenSSH 升级曾导致服务停止及 `/run/sshd` 缺失，通过保留连接启动 ssh.service 后恢复。脚本已补恢复检查。系统仍提示需要重启，保留的内核/固件包与运行中内核更新尚未完成；不要自动重启或把“APT 已运行”写作全部安全更新生效。
+
+腾讯云安全组尚无授权接口可自动核对。容器仅绑定 loopback，不能据此声称完整云侧规则已经审计。
+
+## 制品运输与可复现构建
+
+VPS 的 Docker Hub registry/auth 超时，Docker CE 下载端点重置，PyPI 下载慢。因此由本地访问官方来源，校验后通过已验证的 SSH 传输：
+
+1. `scripts/phase2-fetch-images.py` 验证 manifest、config、每个压缩层 SHA256 与解压 diffID；保存来源和校验记录。
+2. Python 多平台源 index 需要额外元数据/attestation blob，保持原始 index digest 后通过 `docker load --platform linux/amd64` 导入。NapCat 使用排除临时下载文件的清洁 OCI 归档。
+3. 固定上游 Git checkout 和插件 source_tree SHA 双重校验。网络失败留下的部分 checkout 保留，不能覆盖未知现有数据。
+4. Python 构件只从官方 PyPI 获取，选择 Linux amd64 / Python 3.12 兼容文件；每个文件必须出现在原锁的 SHA256 集合中。生产构建使用完整 wheelhouse，关闭安装索引和构建网络。
+5. `scripts/phase2-build-images.sh --apply --dependency-network none` 校验原始镜像身份，再给同一镜像建立唯一的本地构建标签，避免 BuildKit 因 canonical digest 再请求不可达 registry。它在构建前后检查固定来源、层链和最终镜像，不将标签视为新的版本锁。
+
+当前服务器目录：
+
+```text
+/opt/qq-ai-companion/repo/             原 Phase 1 checkout，保持原提交
+/opt/qq-ai-companion/phase2-src/       本次已审核部署源文件快照
+/opt/qq-ai-companion/deployment/
+  compose.yml                        deploy/phase2/compose.yml 的部署副本
+  .env                               仅最终不可变 image ID，不放 Secret
+  build/                             最小构建上下文和 provenance
+  artifacts/                         已校验公开依赖归档
+  state/data/                        AstrBot 数据，UID/GID 10001
+  state/secrets/                     600 文件，运维用户拥有
+  napcat/config/                     NapCat 配置
+  ntqq/                              QQ 登录态
+  backups/                           受保护备份
+```
+
+构建脚本每次在 `build/runs/` 新建上下文，保存输入哈希、原始镜像引用、BuildKit metadata 和最终 image ID。生产 `.env` 只选用通过验证的结果。固定源码和插件不加入公开镜像，镜像不推送仓库。
+
+## 生产配置与启动门禁
+
+先运行 `scripts/phase2-configure.py init`，传入专用 `--state`、已核验 `--sources` 和用户授权的 `--admin-id`。此命令拒绝覆盖已有 state，生成 Dashboard 密码、OneBot token 和 NapCat WebUI token，不输出值。接着运行 `scripts/phase2-napcat-configure.py` 生成原生配置，同样拒绝覆盖登录态。
+
+初始化完成后仅 `state/data` 递归转给 UID/GID 10001；Secret 保留运维用户 600，不能把整个 state 一起改 owner。创建 data/home 和 data/cache。密码、Key 和账号 ID 均不写入仓库。
+
+Compose 使用独立 Docker bridge、重启策略、内存/CPU/pid 限制。AstrBot UID10001、只读根文件系统、全部 capability 删除；NapCat 只授予入口 chown/gosu 所需权限，不开 privileged/SYS_ADMIN，不挂 Docker socket。限制是否兼容须以真实启动检查为准。
+
+- AstrBot：`127.0.0.1:6185`；NapCat：`127.0.0.1:6099`。
+- OneBot Reverse WebSocket：`ws://astrbot:6199/ws`，仅容器内部，不发布主机端口。
+- NapCat 放在 `qq` profile，普通 `compose up` 不会自动启动它。
+- HTTP healthcheck 只表示管理服务响应，不能代替 policy、真实模型、QQ 登录或聊天验收。
+- `phase2_policy` 通过官方插件钩子应用 Phase 1 Guard、Recorder ACL 和固定 persona；只有插件版本、白名单及 Key 门禁通过才允许授权私聊。启动前必须检查本次启动生成的 readiness，不能靠旧文件或面板在线灯。
+
+## 密钥与日志
+
+固定 AstrBot 的 429 分支会把 Key 前 12 个字符写到日志。生产镜像通过 `sitecustomize.py` 在官方 main.py 前安装最小脱敏保护，覆盖 stdlib logging、Loguru、异常和 WebUI LogBroker；无法安全读取 UID10001 的 600 配置时启动失败。插件同步运行中配置并保留旧 Key 脱敏集合。无生产配置的离线镜像审计需显式清空 PYTHONPATH，生产启动不得清空。
+
+这不是对第三方任意 print/native 输出的普遍保证；不能据此开放 debug 或导出原始日志。NapCat 上游在配置生效前会输出 WebUI token/二维码，因此该容器使用 `logging.driver=none` 且禁用文件日志。认证 WebUI 的上游内存日志仍可能含 token，禁止抓取/保存原始日志；状态与连接诊断使用允许字段。
+
+DeepSeek Key 由用户在 SSH 隧道保护的 AstrBot Dashboard 中输入，保持提供商和模型禁用直到本地配置检查完成。Windows PowerShell 脚本当前受 ExecutionPolicy 限制，本部署不改变策略、不绕过执行限制，改用已有受保护界面。不要在聊天、命令参数、环境转储、日志或报告粘贴 Key。
+
+SSH 隧道仅监听 Windows 本机：
+
+```text
+ssh -N -o ExitOnForwardFailure=yes -L 127.0.0.1:6185:127.0.0.1:6185 -L 127.0.0.1:6099:127.0.0.1:6099 qq-companion-vps
+```
+
+随机管理密码通过受 Windows ACL 保护的本地文件交付给账号持有人，不进入工具输出。用户在「模型提供商 → 对话 → deepseek → 设置 → API Key」输入并「保存配置」，不点获取模型或测试。`scripts/phase2-configure.py dashboard-key-status --state <生产 state>` 仅返回就绪状态，不回显 Key。停止 AstrBot 后运行同一脚本的 `accept-dashboard-key --state <生产 state>`，从受保护的 Dashboard 配置接收 Key；Secret 为 `600`，已有不同值时拒绝覆盖，配置原子更新保留 UID/GID 和权限。启用 Flash 并重启后检查本次 readiness。不要在 AstrBot 写配置期间运行此接收操作。
+
+## 真实联调
+
+已核对 [DeepSeek 官方 API 文档](https://api-docs.deepseek.com/)：`https://api.deepseek.com`，主模型 `deepseek-flash`，可选 `deepseek-v4-pro`。当前 Flash 支持图片；Pro 不应配置 image modality。工具调用测试关闭 thinking；Search/Fetch 继续关闭。
+
+`scripts/phase2-test-deepseek.py` 必须显式 `--execute`，最多 8 个请求、每次最多 128 输出 token、无自动重试、每请求 60 秒硬期限；包含中文、上下文、Pro、无副作用工具往返、合成图片和错误响应检查。Key 只从本地受保护文件进入子进程 stdin，报告仅保存状态、HTTP 类别、usage 和断言。本次已观察预期的 HTTP 400；超时保护经过本地测试，未故意制造真实 DeepSeek 超时，远端超时恢复仍为 NOT TESTED。直接 API 的无副作用工具测试不会开启生产会话工具。
+
+NapCat 就绪后由用户本人通过隧道 WebUI 扫码。不要读取密码、验证码、Cookie，不抓取或公开二维码，不反复刷新或绕过风控。真实 QQ 验收需少量授权私聊的接收、模型生成、发送状态、入站/出站归档，以及图片、非白名单拒绝、受控重启和掉线诊断。
+
+本轮已分别完成直接 API 的 8 项受控调用，以及用户确认的 QQ 两轮文本上下文、3 个红色方块图片回复、重启后追加上下文私聊和对应消息归档。最终 Guard 入站 7、sent 7，Recorder 入站 7（图片 1）；另有 1 条空文本在发送前被 Guard 拒绝。真实非授权账号拒绝尚未测试。使用 `scripts/phase2-message-evidence.py` 读取受保护数据库的计数及一致性结果；不要用原始聊天正文或全量数据库转储作为工具输出。具体样本数与结果以 [phase2-validation.md](phase2-validation.md) 为准。
+
+## 原生登录会话保存与重启复测
+
+首次停服后 NapCat 返回 `waiting_qrcode`，原生快速登录候选为空，脚本停止且未发出快速登录请求。用户本人再次扫码成功后，使用辅助脚本保存已经在线的会话：
 
 ```bash
-git clone https://github.com/maxsssssssssss/QQ_AI_Companion.git
-cd QQ_AI_Companion
-# 切换到已审核并合并的 Phase 1 交付 commit，禁止无记录地跟随 main。
-bash scripts/bootstrap.sh
-bash scripts/test-offline.sh
-bash scripts/test-future-tasks.sh
+sudo python3 /opt/qq-ai-companion/phase2-src/scripts/phase2-enable-quick-login.py \
+  --deployment /opt/qq-ai-companion/deployment \
+  --save-current-session --apply
 ```
 
-若 Phase 1 交付尚未推送，先通过审核后的 Git commit 或补丁交付，不能假定 GitHub 上已有本地工作区文件。`bootstrap.sh` 是当前云环境经过验证的构建入口，其他主机的 Docker proxy、CA、工具路径需按其环境核对。离线测试镜像 `qq-ai-companion:phase1` 使用专门 harness，**不能直接作为已验证的生产启动方案**。
+此模式先认证本机 WebUI，确认 `CheckLoginStatus` 为 `ready`，再用 `GetQQLoginInfo` 确认当前机器人账号在线并取得自身身份，随后再次确认 `ready`，只调用一次 `SetQuickLoginQQ` 保存原生配置。身份来自当前机器人会话，不使用管理员的 QQ 号码，不把账号放进命令参数或 Git。脚本还检查挂载的 `napcat/config/webui.json` 为受保护文件，并确认 `autoLoginAccount` 已落盘；只输出状态与布尔断言，不输出账号、Token、二维码或响应正文。没有 `--apply` 时不会连接或修改。
 
-## 待实际验证的 Compose 示例
+`--save-current-session` 不调用 `SetQuickLogin`，不尝试登录；未登录、离线、身份不明或配置未落盘时停止。本轮已完成此模式的在线身份核验与配置持久化。脚本另一个模式仅允许唯一的已保存账号发起至多一次原生快速登录，使用有限的只读状态轮询且不重试登录；保存前必须核验当前在线账号与候选一致，缓存与当前身份不一致时停止且不保存。本轮因候选为空未发出该请求，不能标为实测成功。需要扫码、设备验证或其他账号授权时仍由用户完成。
 
-此示例采用独立上游发行镜像，与 Phase 1 harness 分开。AstrBot 官方 [`compose.yml`](https://github.com/AstrBotDevs/AstrBot/blob/dffe922773725e9c178392c423676ad65044748c/compose.yml) 使用 `soulter/astrbot`；其文档链接到 [NapCat-Docker 的 AstrBot 示例](https://github.com/NapNeko/NapCat-Docker/blob/42e4f9e8373c739f4d2ee599980ab8f87cff39b6/compose/astrbot.yml)，后者使用 `mlikiowa/napcat-docker` 与 `/app/.config/QQ` 持久化目录。本次只读了该示例，没有下载、启动这些发行镜像，也未核实某个具体 image tag/digest 的对应内容。
+保存成功后须先将新配置纳入私有备份，再通过受控服务重启核验 `isLogin`、`coreReady`、`loginPhase` 与内部 Reverse WebSocket 连接。本轮第二次停服备份已包含新配置，恢复原容器后无新增扫码，`isLogin` 与 `coreReady` 为 true、`loginPhase=ready`，内部 WebSocket 连接恢复；用户随后确认追加私聊上下文正确，归档断言也通过。该结论只覆盖本次重启；登录态过期或账号风控仍需用户本人处理。配置持久化、容器健康与真实聊天分别验收，不使用恢复副本启动 QQ。
 
-将已核对 release 版本且记录 digest 的镜像引用写入本机 `.env`：`ASTRBOT_IMAGE=soulter/astrbot@sha256:<核实后的digest>`、`NAPCAT_IMAGE=mlikiowa/napcat-docker@sha256:<核实后的digest>`。尖括号是待填写项；不能使用字面占位符或 `latest` 部署。密钥不放进 `.env`。检查 `.env` 和下述 `data/`、`napcat/`、`ntqq/`、`backups/` 都在 Git 排除范围内。
+## 持久化、备份与待验能力
 
-把下面内容保存到独立部署目录的 `compose.phase2.yml`，与该目录的 `.env` 放一起：
-
-```yaml
-services:
-  astrbot:
-    image: ${ASTRBOT_IMAGE:?Set an audited immutable AstrBot image}
-    restart: unless-stopped
-    init: true
-    security_opt: [no-new-privileges:true]
-    cap_drop: [ALL]
-    environment:
-      TZ: Asia/Shanghai
-    ports:
-      - "127.0.0.1:6185:6185"
-    volumes:
-      - ./data:/AstrBot/data
-    networks: [companion]
-    logging:
-      driver: json-file
-      options: {max-size: "10m", max-file: "3"}
-  napcat:
-    image: ${NAPCAT_IMAGE:?Set an audited immutable NapCat image}
-    restart: unless-stopped
-    environment:
-      NAPCAT_UID: ${NAPCAT_UID:-1000}
-      NAPCAT_GID: ${NAPCAT_GID:-1000}
-    ports:
-      - "127.0.0.1:6099:6099"
-    volumes:
-      - ./napcat/config:/app/napcat/config
-      - ./ntqq:/app/.config/QQ
-    networks: [companion]
-    logging:
-      driver: json-file
-      options: {max-size: "10m", max-file: "3"}
-networks:
-  companion:
-    driver: bridge
-```
-
-两个管理面板仅映射 loopback；6199 不发布到公网；不挂载 Docker socket，不授予 privileged。协议端镜像的运行用户、启动行为和必要权限需在正式版本上实测，不能因为上面 YAML 能解析就声称隔离完整。插件按锁定 commit 原样安装在 `data/plugins/`，完成真实加载核验，尚未取得分发授权的源码不推到公开仓库/镜像。
+生产数据、QQ 登录态及备份都含私密信息。`scripts/phase2-backup.py` 默认只检查文件类型，不写文件或停服务。显式 `--apply` 才执行停服备份和隔离恢复验证；要求两项服务已有容器、部署和备份目录为 `700`，每次使用新的运行 ID：
 
 ```bash
-umask 077
-mkdir -p data napcat/config ntqq backups
-docker compose -f compose.phase2.yml config --quiet
-docker compose -f compose.phase2.yml pull
-docker compose -f compose.phase2.yml up -d astrbot
-docker compose -f compose.phase2.yml ps
-# 完成 AstrBot 初始密码和访问白名单配置后，才启动 QQ 协议端。
-docker compose -f compose.phase2.yml up -d napcat
+sudo python3 /opt/qq-ai-companion/phase2-src/scripts/phase2-backup.py \
+  --deployment /opt/qq-ai-companion/deployment
+
+sudo python3 /opt/qq-ai-companion/phase2-src/scripts/phase2-backup.py \
+  --deployment /opt/qq-ai-companion/deployment \
+  --run-id "$(date -u +%Y%m%dT%H%M%SZ)" --apply
 ```
 
-镜像版本、进程权限、卷所有权和 Dashboard 初始密码机制以选定发行包实测为准。不要用 `chmod 777` 或关闭 TLS 解决启动失败。管理入口从本机 SSH 隧道访问：
+脚本先记录原运行服务，再停止 AstrBot 与 NapCat，在 `finally` 中只启动原本运行的容器。备份失败不会删除原数据；链接、硬链接和特殊文件会被明确拒绝，不能为通过检查自动删除现有数据。运行目录、归档和恢复目标已存在时拒绝覆盖。不得在检查和快照期间另启会写入同一目录的进程。
 
-```bash
-ssh -L 6185:127.0.0.1:6185 -L 6099:127.0.0.1:6099 operator@VPS_HOST
-```
+每次运行在 `deployment/backups/<运行ID>/` 保存：
 
-## NapCat / OneBot 配置和首次扫码（仅步骤）
+- `astrbot-state.zip`：复用原 Phase 1 `scripts/backup.py`，包含 AstrBot state、配置、插件和 Secret，检查文件 SHA-256 与 SQLite 完整性。
+- `napcat-opaque.zip`：原样保存 NapCat 配置及 QQ 登录态，校验完整文件清单与哈希；QQ 的加密 `.db` 不作为 SQLite 读取。
+- `isolated-restore/`：全新恢复副本，文件 `600`、目录 `700`；验证后不挂载容器、不登录 QQ、不替换生产数据。
+- `operation.json`、`result.json`：原服务状态及固定结果字段、计数和摘要，不输出账号文件名、Key 或聊天正文。归档也为 `600`，内部清单可能含私密路径，不得公开。
 
-1. 通过隧道打开 AstrBot Dashboard；按发行版初始密码流程登录后立即设置独立密码。配置 `timezone=Asia/Shanghai`、唯一会话、管理员和受控账号/群白名单。初次关闭主动消息、任意命令执行、远程文件操作和网页工具。
-2. AstrBot 新增 `aiocqhttp` / OneBot v11 reverse WebSocket，内部监听 `0.0.0.0:6199`，设置随机强 token。容器内绑定 0.0.0.0 是为 bridge 上的协议端访问；主机不发布该端口。
-3. NapCat WebUI 选择 WebSocket 客户端，目标 `ws://astrbot:6199/ws`，填同一个 token，消息格式 `array`，自消息上报关闭，重连间隔 5000 ms，心跳 30000 ms。URL 路径 `/ws` 必须按选定 AstrBot/aiocqhttp 实例检查；不要将 forward WS server 配置误作 reverse client。
-4. 仅在上述限制就绪且用户授权后，用户本人用手机 QQ 扫描协议端提供的二维码并确认登录。二维码不截图提交、不进入自动化日志或仓库。若出现设备验证/风控，停止自动重试，交由账号持有人按平台流程处理。
-5. 观察 OneBot WebSocket 已连接、心跳和 `get_login_info`，用一个受控测试号发送最小文本。先验证接收和明确的静态响应，再启用真实 LLM；不能只看面板在线灯。
+本轮两次备份均通过 11 个 SQLite 的完整性检查、隔离恢复与文件哈希核验，原服务重启后消息记录保持不变；第二轮包含新原生自动登录配置。两轮归档均为最终追加消息之前的 6 条入站、6 条成功出站快照，不包含之后的第 7 条。该测试证明备份内容可在隔离目录恢复，不代表已切换生产到恢复副本。`service_state_restored` 只检查 Docker 运行状态：备份后必须另查 AstrBot 策略、QQ 登录与 Reverse WebSocket。首次重启出现的 `waiting_qrcode` 经用户再次扫码与保存原生配置处理，第二次重启的登录、连接和追加私聊检查通过；不能把容器 healthy 当作此结论的证据。恢复副本不得与原实例同时使用同一 QQ 登录态。备份外移前须加密并另行授权目的地。
 
-NapCat 配置结构的对应项是 `network.websocketClients`，字段为 `enable`、`url`、`token`、`messagePostFormat`、`reconnectInterval`、`heartInterval`。端点在同机私有 bridge 时使用明文 WS；跨机器必须另行配置受验证 TLS 或受控专网，不关闭证书验证。
-
-若改选 SnowLuma，用其 `networks.wsClients` / `accessToken` 配置，不直接套用 NapCat JSON；持久化 `config/` 与 `data/`，复核原生 QQ 进程接入方式。SnowLuma Node ≥24 且含专有 native addon，本项目没有做真实启动证明。
-
-## 真实 DeepSeek 配置
-
-确认官方模型名称后，在 AstrBot Dashboard 中新建 DeepSeek provider：`type=openai_chat_completion`、`api_base=https://api.deepseek.com/v1`、provider key 从现有安全绑定/本机秘密文件供应。设置主模型为经核实的 `deepseek-flash`，复杂任务模型为经核实的 `deepseek-v4-pro`；不要宣称宿主会自动按复杂度路由。Phase 1 仅准备配置，复杂任务通过显式模型选择或经过另行验收的路由开启。
-
-Search/Fetch 原生配置为 `provider_settings.web_search=true`、`websearch_provider=deepseek`、`websearch_deepseek_key`。该字段可使用**同一个已授权 DeepSeek key**，无需为了搜索新申请第二个 key；但它与 chat provider 的 key 字段分离，不能假设自动继承。先保持关闭，完成一次公开主题搜索与网页抓取及引用核对后再开放给受控用户。不要将真实隐私发到 Search/Fetch。
-
-首次调用设置较小输出上限和费用预算，分别记录成功/401/429/超时等结果但不记录 Authorization。验证复杂模型失败能清楚报错或按明确策略退回主模型；离线 Mock LLM 的回复质量不构成真实 DeepSeek 质量验收。
-
-## 掉线、监控和失败处理
-
-- 容器状态、OOM、磁盘使用率、SQLite 错误、OneBot 最近心跳、最近成功 LLM 与发送时间分别监控。`restart: unless-stopped` 只能重启进程，不能恢复需要用户确认的 QQ 登录态。
-- OneBot 连接中断先检查网络与 token，然后确认 QQ 是否在线；避免不断扫码或暴力登录。记录离线持续时长，并向运维通道发受控告警，不能向未经允许的联系人群发。
-- 按白名单限制入站、主动发送和群聊范围；验证关闭群白名单后陌生群消息无 LLM 调用、无出站回复。保留 per-session 数据隔离和消息发送审计。
-- AstrBot v4.29.1 一次 Future Task 即使失败也删除任务行，见 [`dependencies.md`](dependencies.md)。上线提醒前要确认接受此限制，或另行实现/验收外部失败日志告警和人工补发；不能标注“自动重试可靠投递”。停止超过 300 秒的任务补发也需要单独验证。
-- 更新前记录全部 commit/image digest，先备份，再在新数据副本上离线验证；通过后切换。不要运行未审计的远程 `curl | sh` 更新脚本。
-
-## 数据卷与备份恢复
-
-AstrBot 的完整 `data/` 包含主库、配置、插件数据、会话与可能的凭据；NapCat 的 `napcat/config/` 和 `ntqq/` 包含协议配置与 QQ 登录态，均按秘密处理。若启用媒体归档，还需确认具体媒体路径和保留规则。SnowLuma 内置配置导出不能替代全部 SQLite 与账号数据备份。
-
-推荐先用最容易验证的一致性策略：**停服务后备份整个已确认的持久化目录**，备份结束恢复服务；长期运行再单独评估应用一致性快照。以下命令不上传内容：
-
-```bash
-umask 077
-backup_path="backups/companion-$(date -u +%Y%m%dT%H%M%SZ).tar.gz"
-docker compose -f compose.phase2.yml stop
-tar -czf "$backup_path" data napcat/config ntqq
-sha256sum "$backup_path" > "$backup_path.sha256"
-docker compose -f compose.phase2.yml up -d
-```
-
-若 tar 失败，先修复备份路径/权限并明确恢复服务；不要覆盖已有备份。生产备份外移前由受控备份工具加密，保留密钥在独立安全位置；不得把明文归档提交到 Git、聊天或公开对象存储。建议每日一份、保留 7 日和每周一份保留 4 周，预算/磁盘按媒体量调整。
-
-恢复到**新的空目录**先校验 SHA256，检查归档仅含预期目录，再解包。隔离网络启动并核对主库/插件库完整性、会话和配置；不要在同一 QQ 账号仍在线时同时启用恢复副本登录。记录恢复时间与具体恢复点，核对 OneBot token、管理员、白名单和模型 key 的安全注入后才替换原实例。
-
-## 首次真实联调验收清单
-
-1. 记录实际 VPS、CPU 架构、OS、QQ/协议端/AstrBot/插件版本和镜像 digest；核对许可证处理结果。
-2. 用户扫码与会话恢复成功；重启协议端与 AstrBot 后重新连接；断网恢复、token 错误、QQ 离线各有明确状态。
-3. 测试账号私聊与受控群各完成“接收 → DeepSeek → 回复 → SQLite记录”，证据脱敏。
-4. 非白名单用户/群不触发 LLM；两个用户会话、记忆、权限互不串联；管理员能力不泄露。
-5. Message Recorder 实际存储，MemoryCompanion 写入/召回/重启保持，PrivateCompanion 状态更新；不从插件加载成功推定这些行为成功。
-6. 主模型与复杂模型各最小调用；真实 Search/Fetch 公开页面、有引用且错误清晰；限流、费用和超时检查。
-7. 一次提醒时区、重启、执行和故意失败场景按已记录原生限制验收；需要可靠重试时单独设阻塞，不以日志存在代替成功送达。
-8. 备份恢复到隔离副本并校验数据；资源、磁盘、日志和掉线告警可用。用户确认后才开放所需范围。
-
-所有条目当前均等待 Phase 2 授权后实施；本文件不会把它们计入 Phase 1 已完成的真实 QQ/真实模型验证。
+不把以下功能算作生产可用：Recorder 全路径出站覆盖、Guard 之外的流式/富媒体发送、自动记忆质量、PrivateCompanion 主动聊天、可靠提醒重试、自然消息合并和严格处理顺序。Future Tasks 一次性任务失败仍可能删除；Phase 2 不扩展为 Phase 3/4 重写。

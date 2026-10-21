@@ -1,21 +1,31 @@
 # QQ AI Companion
 
-基于 AstrBot 的独立集成项目。当前工作范围是 **Phase 1：基础系统集成与离线端到端验收**，使用合成 OneBot v11 事件和 Mock LLM，在断网容器内运行真实 AstrBot、原生适配器、模型 provider、数据库和所选插件。
+基于 AstrBot 的独立集成项目。**Phase 1 的离线集成交付已保留；Phase 2 已完成 VPS 部署、真实 DeepSeek 与 QQ 文本/图片私聊、归档、隔离备份恢复及一次 QQ 重启登录/协议恢复，当前总状态为 PARTIAL。** 真实非授权账号负例和长期稳定性仍需验收。Phase 1 使用合成 OneBot v11 事件和 Mock LLM，在断网容器内运行真实 AstrBot、原生适配器、模型 provider、数据库和所选插件。
 
 最终 P0 判定、逐项证据与剩余限制见 [Phase 1 验收报告](docs/phase1-validation.md)和[最终交付报告](docs/delivery-report.md)。启动成功、doctor 通过或单个测试返回零，都不能代替全部 P0 验收结论。
 
 完整任务书的执行索引见 [Phase 1 范围](docs/phase1-scope.md)：只有 T01–T20 全部为 PASS 才能标记 Phase 1 PASS；P1 的已验证、受限和未运行项目另行记录。
+
+## Phase 2 当前状态
+
+截至本次接管记录，已通过用户独立核对的主机指纹恢复 SSH 连接；在随后明确授权的范围内完成 Ubuntu 系统更新，安装 Ubuntu 仓库提供的 Docker `29.1.3` 和 Compose `2.40.3`。SSH 保留现有配置。系统提示需要重启，另有内核/固件相关包保留；尚未执行重启，不能声称运行中内核已完成更新。
+
+生产接线沿用 AstrBot `4.29.1`、NapCat `4.18.38` 和 Phase 1 锁定的三个插件，不重新开发 Phase 1。生产配置、镜像构建入口及补充的启动策略位于 [deploy/phase2](deploy/phase2/) 和 [integrations/phase2_policy](integrations/phase2_policy/)；启动策略复用既有 Guard、命令 ACL 和人格 API，默认关闭主动消息及自动工具调用。
+
+AstrBot 生产镜像已通过 152 个锁定包、512 个 Python 源文件检查并健康启动，三个插件已实际加载。NapCat 私有派生镜像已运行，用户本人已用备用 QQ 扫码登录。真实 DeepSeek 8 项受控 API 测试通过；用户确认 QQ 两轮文本上下文、图片中 3 个红色方块的识别，以及重启后追加上下文回复均正确。最终 Guard 记录 7 条入站、7 条成功出站和 1 条发送前被拦截的空文本，Recorder 记录 7 条入站（含 1 条图片）。两轮停服备份、各 11 个 SQLite 完整性检查、隔离恢复及文件哈希校验通过；备份时的 6 条入站与 6 条成功出站重启后保持不变，最终追加的第 7 条不在这两份备份内。NapCat 首次重启返回等待扫码状态；用户再次扫码并保存原生自动登录配置后，第二次受控重启无需再次扫码，登录状态、内部 Reverse WebSocket 与真实私聊恢复。发布前回归的 139 项 Phase 2 专项测试全部通过；一次恢复不代表登录态长期有效。
+
+NapCat 配置使用 `logging.driver=none`，避免上游启动输出的 WebUI token 或二维码进入 Docker 日志；上游认证后可访问的内存日志仍可能保留 token。控制台可访问、容器健康或启动策略通过都不等同完整生产验收通过。具体证据及剩余问题见 [Phase 2 实测记录](docs/phase2-validation.md)、[部署说明](docs/phase2-deployment.md)和[已知问题](docs/known-issues.md)。
 
 ## 固定版本与复用边界
 
 - AstrBot：`v4.29.1`，提交 `dffe922773725e9c178392c423676ad65044748c`，原始源码保持不变。
 - 运行环境：Python 3.12，`linux/amd64`；基础镜像以 digest 固定，Python 依赖以版本和制品 SHA-256 固定。
 - 第三方候选：Message Recorder、MemoryCompanion、PrivateCompanion；仓库、固定提交、兼容范围和源码摘要见 [plugins-lock.json](config/plugins-lock.json)。
-- 本项目只补充配置、启动/验收脚本、备份工具和一个轻量 `phase1_guard` 插件。插件通过 AstrBot 公开 API 补足私聊去重、双向原文归档及发送结果记录。
+- Phase 1 补充配置、启动/验收脚本、备份工具和轻量 `phase1_guard` 插件。Guard 通过 AstrBot 公开 API 补足私聊去重、双向原文归档及发送结果记录；Phase 2 补充生产入口接线与日志脱敏，不修改锁定的上游源文件。
 
 第三方插件仅下载到忽略跟踪的 `.runtime/upstream/` 做本地原样评估，不进入本项目 Git、构建镜像或发布包。Message Recorder 的许可证声明存在冲突；MemoryCompanion 与 PrivateCompanion 未找到项目级许可证。详细核查与使用边界见 [依赖与许可证](docs/dependencies.md)、[兼容性](docs/compatibility.md)和[插件说明](docs/plugins.md)。
 
-普通 QQ 的后续协议接入优先 NapCat、SnowLuma 作为备选，本轮仅核查上游，未安装登录。任务指定的 `deepseek-flash` / `deepseek-v4-pro` 当前官方可用性尚未核实；离线测试使用 `phase1-mock`，不把 Mock 成功当成真实 DeepSeek 调用证明。
+普通 QQ 的 Phase 2 协议接入选用锁定的 NapCat，QQ 扫码由用户本人完成。已核查 DeepSeek [官方型号说明](https://api-docs.deepseek.com/quick_start/pricing/)与[图片输入文档](https://api-docs.deepseek.com/guides/vision/)：`deepseek-flash` 支持图片输入，`deepseek-v4-pro` 不支持。本次真实 API 与 QQ 图片测试证据单独记录在 Phase 2 报告；Phase 1 离线测试使用 `phase1-mock`，不能充当真实 DeepSeek 调用证明。
 
 ## 复现离线验收
 
@@ -65,7 +75,8 @@ bash scripts/test-future-tasks.sh
 | 路径 | 用途 |
 | --- | --- |
 | `config/`、`lockfiles/` | 可审阅配置、固定上游版本和依赖哈希 |
-| `integrations/phase1_guard/` | 本项目轻量公开 API 插件 |
+| `integrations/phase1_guard/` | Phase 1 轻量公开 API 插件 |
+| `deploy/phase2/`、`integrations/phase2_policy/` | Phase 2 生产配置、镜像入口、启动策略和日志保护 |
 | `.runtime/upstream/` | 忽略跟踪的原始上游 checkout |
 | `.runtime/runs/<run-id>/` | 每次运行的真实数据、配置及插件状态 |
 | `evidence/runs/<run-id>/` | 本次命令输出、协议记录、启动信息、结果 JSON 和摘要 |
@@ -78,7 +89,9 @@ bash scripts/test-future-tasks.sh
 
 ## 停机备份和恢复
 
-先停止 AstrBot 和所有会写入同一状态目录的进程，再备份整个 `ASTRBOT_ROOT`。集成运行器返回后已关闭其启动的服务；独立手动进程需要调用者自行停止。以下 `<run-id>` 替换为实际运行 ID：
+Phase 2 生产部署使用 [scripts/phase2-backup.py](scripts/phase2-backup.py)。默认仅检查文件类型；显式 `--apply` 后记录原运行服务、停止两个容器，分别备份 AstrBot state 与 NapCat 配置/QQ 登录态，并恢复到全新的隔离目录验证。结束时只恢复原本运行的服务，不启动恢复副本。目录为 `700`、归档及恢复文件为 `600`，拒绝覆盖和链接/特殊文件。QQ 登录态按原始字节及哈希处理，不把可能加密的 `.db` 当 SQLite；完成后仍需单独确认 QQ 登录及协议重连。操作入口和验收边界见[部署说明](docs/phase2-deployment.md)。
+
+以下为 Phase 1 离线状态的备份方法。先停止 AstrBot 和所有会写入同一状态目录的进程，再备份整个 `ASTRBOT_ROOT`。集成运行器返回后已关闭其启动的服务；独立手动进程需要调用者自行停止。以下 `<run-id>` 替换为实际运行 ID：
 
 ```bash
 state_path=".runtime/runs/<run-id>/base"
@@ -98,10 +111,10 @@ python3 scripts/export_data.py "$state_path" backups/phase1-synthetic-export.jso
 
 导出只选择已知聊天数据表和字段，保留原始时间语义，省略配置和命名秘密字段；输出文件不得已存在。聊天文本保留原文，工具不保证扫描掉文本中的秘密，因此只用于本轮合成状态。JSON 导出不包含完整可恢复状态，不能代替 ZIP 备份。
 
-## 本轮范围
+## Phase 1 历史验收范围
 
 真实基础链路、持久化、进程重启、备份恢复、配置和隔离通过实际测试取证；三个插件按真实加载、命令、数据和上下文注入分别记录。P1 兼容性或授权问题单独列明，不由替身插件冒充完成。
 
-AstrBot 上游 WebUI 仅作来源与能力核查，当前入口是 headless，仪表盘关闭，没有实际 UI 验收。原生未来任务的调度、落盘和重启行为有独立检查；其中一次性定时任务失败后会被上游删除，不能称为可靠重试或生产补发。
+Phase 1 对 AstrBot 上游 WebUI 仅作来源与能力核查，离线入口是 headless，仪表盘关闭，没有实际 UI 验收。原生未来任务的调度、落盘和重启行为有独立检查；其中一次性定时任务失败后会被上游删除，不能称为可靠重试或生产补发。
 
-不登录真实 QQ、不部署 VPS、不使用真实用户隐私、不发布授权不明的第三方源码。本轮不进入 Phase 2。更多设计和边界见 [架构](docs/architecture.md)及[安全说明](docs/security.md)。
+Phase 1 未登录真实 QQ、未部署 VPS、未使用真实用户隐私，也未发布授权不明的第三方源码。后续 Phase 2 的执行记录单独保存，不回写为 Phase 1 的验证成果。更多设计和边界见 [架构](docs/architecture.md)及[安全说明](docs/security.md)。

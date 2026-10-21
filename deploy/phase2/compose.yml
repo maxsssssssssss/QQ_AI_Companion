@@ -1,0 +1,80 @@
+name: qq-ai-companion
+services:
+  astrbot:
+    image: ${ASTRBOT_IMAGE:?Set the verified production image ID}
+    pull_policy: never
+    restart: unless-stopped
+    init: true
+    user: "10001:10001"
+    working_dir: /AstrBot
+    read_only: true
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    environment:
+      TZ: Asia/Shanghai
+      ASTRBOT_ROOT: /AstrBot
+      HOME: /AstrBot/data/home
+      XDG_CACHE_HOME: /AstrBot/data/cache
+      PYTHONDONTWRITEBYTECODE: "1"
+      PYTHONUNBUFFERED: "1"
+    ports:
+      - "127.0.0.1:6185:6185"
+    volumes:
+      - ./state/data:/AstrBot/data
+    tmpfs:
+      - /tmp:size=128m,mode=1777
+    mem_limit: 1400m
+    memswap_limit: 2000m
+    cpus: 1.25
+    pids_limit: 256
+    networks: [companion]
+    logging:
+      driver: json-file
+      options: {max-size: "10m", max-file: "3"}
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:6185/', timeout=4).close()"
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 90s
+  napcat:
+    image: ${NAPCAT_IMAGE:?Set the verified production image ID}
+    pull_policy: never
+    profiles: [qq]
+    restart: unless-stopped
+    init: true
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    cap_add: [CHOWN, DAC_OVERRIDE, FOWNER, SETUID, SETGID]
+    environment:
+      TZ: Asia/Shanghai
+      NAPCAT_UID: "10002"
+      NAPCAT_GID: "10002"
+    ports:
+      - "127.0.0.1:6099:6099"
+    volumes:
+      - ./napcat/config:/app/napcat/config
+      - ./ntqq:/app/.config/QQ
+    shm_size: 128m
+    mem_limit: 1600m
+    memswap_limit: 2200m
+    cpus: 1.0
+    pids_limit: 384
+    networks: [companion]
+    # This upstream release prints its WebUI token (and potentially QR data).
+    # Do not retain raw stdout/stderr; use authenticated status checks instead.
+    logging:
+      driver: none
+    healthcheck:
+      test: [CMD, curl, -fsS, --max-time, "4", -o, /dev/null, "http://127.0.0.1:6099/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 90s
+networks:
+  companion:
+    driver: bridge

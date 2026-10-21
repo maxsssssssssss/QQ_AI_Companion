@@ -1,0 +1,9 @@
+name: phase2_policy
+display_name: QQ Companion Production Policy
+desc: Apply existing command ACL and persona APIs before accepting controlled private chat.
+version: 0.1.0
+author: QQ AI Companion contributors
+repo: https://github.com/maxsssssssssss/QQ_AI_Companion
+support_platforms:
+  - aiocqhttp
+astrbot_version: ">=4.29.1,<4.30"

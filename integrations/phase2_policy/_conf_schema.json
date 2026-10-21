@@ -1,0 +1,12 @@
+{
+  "admin_id": {
+    "type": "string",
+    "description": "Single explicitly authorized private QQ sender. Required.",
+    "default": ""
+  },
+  "platform_id": {
+    "type": "string",
+    "description": "Configured OneBot adapter instance ID.",
+    "default": "napcat"
+  }
+}
