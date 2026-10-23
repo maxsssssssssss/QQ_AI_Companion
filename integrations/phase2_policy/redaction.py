@@ -33,6 +33,7 @@ def configured_secrets(config: dict) -> set[str]:
         retain(source.get("key"))
     for provider in config.get("provider", []):
         retain(provider.get("key"))
+    retain(config.get("provider_settings", {}).get("websearch_deepseek_key"))
     for platform in config.get("platform", []):
         for field in ("ws_reverse_token", "access_token", "token"):
             retain(platform.get(field))

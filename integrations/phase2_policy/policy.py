@@ -9,7 +9,7 @@ class PolicyViolation(ValueError):
     pass
 
 
-def validate_policy(config: dict, admin_id: str, platform_id: str, *, require_key=True):
+def validate_policy(config: dict, admin_id: str, platform_id: str, *, require_key=True, capabilities=None):
     def require(condition, reason):
         if not condition:
             raise PolicyViolation(reason)
@@ -36,7 +36,24 @@ def validate_policy(config: dict, admin_id: str, platform_id: str, *, require_ke
             platform.get("ws_reverse_port") == 6199, "unexpected_onebot_endpoint")
     require(len(str(platform.get("ws_reverse_token", ""))) >= 32, "weak_onebot_token")
     provider_settings = config.get("provider_settings", {})
-    for name in ("streaming_response", "web_search", "show_tool_use_status",
+    capabilities = capabilities or {}
+    require(set(capabilities) <= {"search"} and all(type(v) is bool for v in capabilities.values()),
+            "invalid_phase3_capabilities")
+    search = capabilities.get("search", False)
+    require(provider_settings.get("web_search") is search, "unsafe_web_search")
+    if search:
+        require(provider_settings.get("websearch_provider") == "deepseek", "unexpected_search_provider")
+        require(provider_settings.get("web_search_link") is True, "search_sources_disabled")
+        keys = provider_settings.get("websearch_deepseek_key", [])
+        require(isinstance(keys, list) and len(keys) == 1 and isinstance(keys[0], str) and len(keys[0]) >= 16,
+                "missing_search_key")
+        require(provider_settings.get("buffer_intermediate_messages") is False, "intermediate_buffer_enabled")
+        require(provider_settings.get("display_reasoning_text") is False, "reasoning_display_enabled")
+        misc = config.get("agent_runner", {}).get("config", {}).get("misc", {})
+        require(type(misc.get("max_steps")) is int and 1 <= misc["max_steps"] <= 6, "unbounded_agent_steps")
+        require(type(misc.get("tool_call_timeout")) is int and 30 <= misc["tool_call_timeout"] <= 60,
+                "unexpected_tool_timeout")
+    for name in ("streaming_response", "show_tool_use_status",
                  "show_tool_call_result"):
         require(provider_settings.get(name) is False, f"unsafe_{name}")
     require(provider_settings.get("computer_use_runtime") == "none",

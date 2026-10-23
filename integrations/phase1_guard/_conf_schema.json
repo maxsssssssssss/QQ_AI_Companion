@@ -1,7 +1,67 @@
 {
+  "phase3_empty_recovery_enabled": {
+    "type": "bool",
+    "default": false,
+    "description": "Only empty final replies: one 12-second text-only continuation, durable maximum four attempts per Shanghai day; no tool replay"
+  },
   "send_timeout_seconds": {
     "type": "float",
     "description": "Offline single text send timeout; timeout is unknown and never automatically retried.",
     "default": 2.0
+  },
+  "phase3_enabled": {
+    "type": "bool",
+    "description": "Opt in to Phase3 migration, input grouping and controlled multi-send. Requires release approval.",
+    "default": false
+  },
+  "phase3_admin_id": {
+    "type": "string",
+    "description": "Authorized private QQ target; runtime only.",
+    "default": ""
+  },
+  "phase3_platform_id": {
+    "type": "string",
+    "description": "Authorized AstrBot platform ID.",
+    "default": ""
+  },
+  "phase3_group_window": {
+    "type": "float",
+    "description": "Engineering debounce window seconds.",
+    "default": 0.8
+  },
+  "phase3_group_max_wait": {
+    "type": "float",
+    "description": "Maximum input collection wait seconds.",
+    "default": 3.0
+  },
+  "phase3_group_max_messages": {
+    "type": "int",
+    "description": "Maximum collection cohort size.",
+    "default": 8
+  },
+  "phase3_proactive_enabled": {
+    "type": "bool",
+    "description": "Requires separate approved proactive window; stays false by default.",
+    "default": false
+  },
+  "phase3_multibubble_enabled": {
+    "type": "bool",
+    "description": "Use pinned semantic parser and one bounded Guard send loop. Can be disabled independently.",
+    "default": true
+  },
+  "phase3_bubble_min_interval": {
+    "type": "float",
+    "description": "Minimum seconds between later bubbles. First bubble has no added wait.",
+    "default": 0.6
+  },
+  "phase3_bubble_max_interval": {
+    "type": "float",
+    "description": "Maximum seconds between bubbles (validated at most 3).",
+    "default": 1.8
+  },
+  "phase3_plain_text_enabled": {
+    "type": "bool",
+    "description": "Bounded cosmetic Markdown removal before QQ text delivery. Keeps code content and link URLs; can be disabled independently.",
+    "default": false
   }
 }

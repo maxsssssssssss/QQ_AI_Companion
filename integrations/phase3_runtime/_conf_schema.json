@@ -1,0 +1,155 @@
+{
+  "enabled": {
+    "type": "bool",
+    "default": false,
+    "description": "Phase 3 operator-approved release switch"
+  },
+  "persona": {
+    "type": "bool",
+    "default": false,
+    "description": "Single confirmed V0.1 persona"
+  },
+  "natural_chat": {
+    "type": "bool",
+    "default": false,
+    "description": "Controlled semantic turns and deliveries"
+  },
+  "memory": {
+    "type": "bool",
+    "default": false,
+    "description": "Native MemoryCompanion extraction with provenance"
+  },
+  "search": {
+    "type": "bool",
+    "default": false,
+    "description": "Native public Search/Fetch; separate credential required"
+  },
+  "memory_recall_guidance": {
+    "type": "bool",
+    "default": false,
+    "description": "Use native memory navigation for missing personal facts; no extra classifier or public search"
+  },
+  "proactive": {
+    "type": "bool",
+    "default": false,
+    "description": "Requires real passive acceptance, then an explicitly dated 72-hour approved trial"
+  },
+  "background_web": {
+    "type": "bool",
+    "default": false,
+    "description": "Not enabled in this release"
+  },
+  "preferred_address": {
+    "type": "string",
+    "default": "你",
+    "description": "Private runtime binding for the user-confirmed address"
+  },
+  "proactive_window": {
+    "type": "object",
+    "description": "After real passive PASS only: next Asia/Shanghai 09:00 for 72 hours; Unix seconds",
+    "items": {
+      "window_start": {
+        "type": "int",
+        "default": 0
+      },
+      "window_end": {
+        "type": "int",
+        "default": 0
+      },
+      "max_per_day": {
+        "type": "int",
+        "default": 2
+      },
+      "cooldown": {
+        "type": "int",
+        "default": 14400
+      },
+      "quiet_hours": {
+        "type": "list",
+        "default": [
+          23,
+          9
+        ],
+        "description": "Asia/Shanghai quiet period [23,9): sends allowed 09:00 inclusive to 23:00 exclusive"
+      }
+    }
+  },
+  "memory_topic_aliases": {
+    "description": "资料主题同义词（仅定位主题，不填用户事实）",
+    "type": "object",
+    "items": {
+      "games": {
+        "type": "list",
+        "description": "games",
+        "default": [
+          "游戏",
+          "玩过",
+          "玩哪些",
+          "爱玩",
+          "打什么",
+          "玩得最久"
+        ]
+      },
+      "food": {
+        "type": "list",
+        "description": "food",
+        "default": [
+          "饮食",
+          "口味",
+          "吃",
+          "食物",
+          "菜",
+          "喝",
+          "饮料"
+        ]
+      },
+      "reading": {
+        "type": "list",
+        "description": "reading",
+        "default": [
+          "阅读",
+          "读书",
+          "书籍",
+          "小说"
+        ]
+      },
+      "work": {
+        "type": "list",
+        "description": "work",
+        "default": [
+          "工作",
+          "职业",
+          "开发",
+          "编程"
+        ]
+      },
+      "address": {
+        "type": "list",
+        "description": "address",
+        "default": [
+          "称呼",
+          "叫我",
+          "名字"
+        ]
+      },
+      "chat": {
+        "type": "list",
+        "description": "chat",
+        "default": [
+          "聊天",
+          "交流",
+          "回复风格"
+        ]
+      },
+      "hobbies": {
+        "type": "list",
+        "description": "hobbies",
+        "default": [
+          "兴趣",
+          "爱好",
+          "娱乐"
+        ]
+      }
+    }
+  }
+}

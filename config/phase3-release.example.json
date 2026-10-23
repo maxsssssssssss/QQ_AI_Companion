@@ -1,0 +1,20 @@
+{
+  "enabled": false,
+  "persona": false,
+  "natural_chat": false,
+  "memory": false,
+  "search": false,
+  "proactive": false,
+  "background_web": false,
+  "preferred_address": "你",
+  "proactive_window": {
+    "window_start": 0,
+    "window_end": 0,
+    "max_per_day": 2,
+    "cooldown": 14400,
+    "quiet_hours": [
+      23,
+      9
+    ]
+  }
+}

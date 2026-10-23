@@ -1,0 +1,40 @@
+{
+  "enabled": {
+    "type": "bool",
+    "default": false,
+    "description": "Enable only after deployment and search credential approval"
+  },
+  "admin_id": {
+    "type": "string",
+    "default": "",
+    "description": "Authorized private sender, injected privately"
+  },
+  "platform_id": {
+    "type": "string",
+    "default": "",
+    "description": "Pinned OneBot platform ID"
+  },
+  "public_terms": {
+    "type": "list",
+    "default": [
+      "DeepSeek",
+      "AstrBot",
+      "炉石传说"
+    ],
+    "description": "Operator-reviewed PUBLIC topic terms only; never private names or profile facts"
+  },
+  "fetch_hosts": {
+    "type": "list",
+    "default": [
+      "api-docs.deepseek.com",
+      "docs.astrbot.app",
+      "hearthstone.blizzard.com"
+    ],
+    "description": "Exact reviewed public hosts; no wildcard, private IP or URL credentials"
+  },
+  "daily_attempt_limit": {
+    "type": "int",
+    "default": 60,
+    "description": "Combined Search/Fetch daily attempt ceiling; engineering default pending approval, not a target frequency"
+  }
+}

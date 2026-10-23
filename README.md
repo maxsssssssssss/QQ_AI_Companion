@@ -6,6 +6,16 @@
 
 完整任务书的执行索引见 [Phase 1 范围](docs/phase1-scope.md)：只有 T01–T20 全部为 PASS 才能标记 Phase 1 PASS；P1 的已验证、受限和未运行项目另行记录。
 
+## Phase 3 当前上线与验收
+
+Phase 3 已在用户批准范围内完成首轮受限上线：V0.1 人格、自然文本、自动记忆、多气泡和三个审核主题的 Search/Fetch 已启用。**整体仍为 PARTIAL**。真实 QQ 普通回复、两个自然气泡、搜索前回应→Search/Fetch→最终回答已有发送和归档证据；旧22条获准历史已自动摘要且原文指纹保持。本人已批准的L1 3组、L2 12组资料完成窄导入和来源核对，此前真实资料抽样多次失败；V2 r2及后续原生上下文修复、完整自动回归后，最新真实资料验收已本人确认通过；L3未导入，首次主动窗口尚未开启，后台搜索关闭。
+
+多气泡复用 PrivateCompanion 原协议，单次主模型生成，Guard 逐条发送和记账。用户确认实际两条回复“自然，没有重复内容”。连续输入自测反馈保留，但本轮实际审计没有三个来源归组的证据，重复测试按用户要求跳过；新版图片完成原生/真实Flash合成验证，真实QQ单图及追问已获本人确认；小字/两图实测由用户豁免。资料准确性、完整真实联合和主动验收仍各自有门槛。
+
+2026-10-24资料上下文修复已上线：只更新3个Runtime源码，AstrBot新停写备份和16库隔离恢复通过，NapCat保持登录。本人已确认资料原题、关系区分、新会话召回、普通聊天、技术长答、单图和图片追问正确。**本轮按用户决定收尾：31/36限定层级PASS、5项用户豁免，Search26/26限定层级PASS；整体技术状态仍PARTIAL。** 主动功能按用户最新要求保持OFF，72小时及其他剩余测试全部跳过，无自动启用窗口。历史失败和未测范围保留。详见[四项体验V2](docs/phase3-four-capabilities-validation.md)。
+
+逐项结果见 [36 项 P0 验收](docs/phase3-validation.md)、[26 项自然搜索验收](docs/natural-agent-validation.md)、[多气泡专项](docs/phase3-multibubble-validation.md)、[资料召回修复](docs/phase3-profile-recall-validation.md)。实现和复现见 [Phase 3 实施](docs/phase3-implementation.md)，生产切换及恢复见 [Phase 3 部署](docs/phase3-deployment.md)，资料范围见 [私人资料预览](docs/private-profile-import.md)。历史失败及旧报告保留。GitHub 发布仅包含工程源码、合成测试及脱敏报告；私有运行证据、访谈、凭据、登录态和第三方依赖源码不随仓库发布，不改写 Phase 1 历史。
+
 ## Phase 2 当前状态
 
 截至本次接管记录，已通过用户独立核对的主机指纹恢复 SSH 连接；在随后明确授权的范围内完成 Ubuntu 系统更新，安装 Ubuntu 仓库提供的 Docker `29.1.3` 和 Compose `2.40.3`。SSH 保留现有配置。系统提示需要重启，另有内核/固件相关包保留；尚未执行重启，不能声称运行中内核已完成更新。
