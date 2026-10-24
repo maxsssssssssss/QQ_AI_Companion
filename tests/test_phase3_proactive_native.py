@@ -4,6 +4,7 @@ This executes original candidate creation, delivery identity and two-level
 generation methods. The timer loop and provider are fixtures, not real QQ/API.
 """
 import asyncio
+from datetime import datetime
 import importlib
 import json
 from pathlib import Path
@@ -454,6 +455,160 @@ class NativeProactiveTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await self.bridge.generate(self.private.user,'人','followup'),'')
         self.assertEqual(self.sends,[])
         self.assertEqual(self.private.model_calls,[])
+
+    def continuous_gate(self):
+        self.bridge.detach()
+        self.gate.close()
+        self.now = datetime.fromisoformat('2026-10-24T09:00:00+08:00').timestamp()
+        self.gate = ProactiveGate(Path(self.temp.name)/'gate.sqlite', allowed_session=self.private.user['umo'],
+            enabled=True, mode='continuous', window_start=0, window_end=0,
+            max_per_day=5, max_generations_per_day=5, cooldown=10800,
+            quiet_hours=(0,9), clock=lambda:self.now)
+        self.private.plan(now=self.now)
+        self.bridge = NativeProactiveBridge(self.private,self.guard,self.gate,message._ProactiveSendOutcome,
+            event_resolver=lambda *args:dict(self.status))
+        self.bridge.attach()
+
+    def test_continuous_native_config_authorization_and_runtime_limits(self):
+        self.continuous_gate()
+        cfg = native_proactive_config({}, '10001', enabled=True, policy={'mode':'continuous'})
+        self.assertEqual(cfg['basic_config']['quiet_hours'], '00:00-09:00')
+        self.assertEqual(cfg['private_followup_config']['min_interval_minutes'], 180)
+        self.assertEqual(cfg['proactive_reach_config']['max_daily_messages'], 0)
+        self.assertFalse(cfg['proactive_generation_config']['enable_llm_proactive_message'])
+        for limit in (0, 6, True):
+            with self.assertRaises(PermissionError):
+                authorize_native_target(self.private,self.private.user['umo'],approved=True,daily_limit=limit)
+        authorize_native_target(self.private,self.private.user['umo'],approved=True,daily_limit=5)
+        self.private.config = cfg
+        self.private.max_daily_messages = 0
+        self.private.enable_llm_proactive_message = False
+        self.private.quiet_hours = '23:00-09:00'
+        self.private.min_interval_minutes = 240
+        self.private.proactive_intensity_preset = 'off'
+        self.assertTrue(self.bridge.activate_native_config())
+        self.assertEqual(self.private._runtime_max_daily_messages(), 5)
+        self.assertEqual(self.private._effective_user_daily_limit(self.private.user), 5)
+        self.assertEqual(self.private._effective_user_min_interval_minutes(self.private.user), 180)
+        self.assertEqual(self.private.quiet_hours, '00:00-09:00')
+        self.assertEqual(cfg['proactive_reach_config']['max_daily_messages'], 0)
+        self.assertFalse(cfg['proactive_generation_config']['enable_llm_proactive_message'])
+        self.bridge.detach()
+        self.assertEqual(self.private.max_daily_messages, 0)
+        self.assertFalse(self.private.enable_llm_proactive_message)
+        self.assertEqual(self.private.quiet_hours, '23:00-09:00')
+        self.assertEqual(self.private.min_interval_minutes, 240)
+
+    def test_continuous_native_reason_window_reaches_2359_and_restores_on_detach(self):
+        from zoneinfo import ZoneInfo
+        self.continuous_gate()
+        self.private.max_daily_messages = 0
+        self.private.enable_llm_proactive_message = False
+        self.private._environment_now = lambda:datetime.fromtimestamp(self.now, ZoneInfo('Asia/Shanghai'))
+        self.private._environment_fromtimestamp = lambda at:datetime.fromtimestamp(at, ZoneInfo('Asia/Shanghai'))
+        native_check = types.MethodType(engine.ProactiveEngineMixin._is_reason_allowed_now, self.private)
+        original_birthday = self.private._reason_windows('birthday_celebration', self.private.user)
+        self.bridge.activate_native_config()
+        for clock, allowed in (('08:59:59',False), ('09:00:00',True),
+                               ('23:30:00',True), ('23:59:59',True), ('00:00:00',False)):
+            self.now = datetime.fromisoformat('2026-10-24T'+clock+'+08:00').timestamp()
+            self.assertEqual(native_check('open_loop_followup', self.private.user), allowed)
+            self.assertEqual(self.gate.continuation_allowed(self.gate.session), allowed)
+            self.assertEqual(self.private._quiet_hours_end_timestamp(self.now) > self.now, not allowed)
+        self.now = datetime.fromisoformat('2026-10-24T23:30:00+08:00').timestamp()
+        self.assertFalse(native_check('open_loop_followup', {'umo':'test:FriendMessage:10002'}))
+        self.assertEqual(self.private._reason_windows('birthday_celebration', self.private.user), original_birthday)
+        self.bridge.detach()
+        self.assertFalse(native_check('open_loop_followup', self.private.user))
+
+    async def test_continuous_scheduler_does_not_expire_at_zero_or_72_hours(self):
+        self.continuous_gate()
+        self.private.max_daily_messages = 0
+        self.private.enable_llm_proactive_message = False
+        self.bridge.activate_native_config()
+        self.now += 10 * 86400
+        self.private.plan(now=self.now)
+        await self.private._run_scheduler_cycle(immediate=True)
+        self.assertTrue(self.gate.enabled)
+        self.assertTrue(self.private.enable_llm_proactive_message)
+        self.assertEqual(len(self.sends), 1)
+
+    async def test_continuous_native_skip_and_defer_consume_five_evaluations(self):
+        self.continuous_gate()
+        for number in range(6):
+            self.private.plan(event_id='budget-'+str(number), now=self.now)
+            self.private.model_text = '[PHASE3_PROACTIVE:skip]' if number % 2 else '[PHASE3_PROACTIVE:defer:60]'
+            self.assertEqual(await self.bridge.generate(self.private.user,'人','followup'), '')
+            self.now += 60
+        self.assertEqual(len(self.private.model_calls), 5)
+        states = self.gate.db.execute('SELECT state FROM proactive_generations ORDER BY rowid').fetchall()
+        self.assertEqual(states, [('deferred',), ('skipped',), ('deferred',), ('skipped',), ('deferred',)])
+        self.assertEqual(self.gate.db.execute('SELECT count(*) FROM proactive_attempts').fetchone()[0], 0)
+
+    async def test_continuous_offer_is_finite_and_honors_source_expiry(self):
+        self.continuous_gate()
+        offered = []
+        self.private._offer_proactive_candidate = lambda user_id,user,candidate:offered.append(candidate) or True
+        self.bridge.event_source = lambda umo:[{'event_id':'offer-one','revision':1,'user_quote':'合成待跟进事项'}]
+        self.assertTrue(await self.bridge.offer_due_event())
+        self.assertEqual(offered[0]['expire_at'], self.now+3600)
+        expiry = datetime.fromtimestamp(self.now+900, datetime.fromisoformat('2026-10-24T00:00:00+08:00').tzinfo).isoformat()
+        self.bridge.event_source = lambda umo:[{'event_id':'offer-two','revision':1,'user_quote':'合成短期事项','expires_at':expiry}]
+        self.assertTrue(await self.bridge.offer_due_event())
+        self.assertEqual(offered[1]['expire_at'], self.now+900)
+
+    async def test_continuous_defer_keeps_original_expiry_even_if_native_extends(self):
+        self.continuous_gate()
+        native = self.private.user['proactive_impulses'][0]
+        original_expiry = self.now+7200
+        native['expire_at'] = original_expiry
+        self.private.model_text = '[PHASE3_PROACTIVE:defer:60]'
+        await self.bridge.generate(self.private.user,'人','followup')
+        self.assertEqual(native['context']['phase3_decision']['expires_at'], original_expiry)
+        self.assertEqual(native['expire_at'], original_expiry)
+        self.now += 3600
+        native['expire_at'] = self.now+86400  # Simulate native scheduler normalization.
+        self.private.model_text = '[PHASE3_PROACTIVE:defer:240]'
+        await self.bridge.generate(self.private.user,'人','followup')
+        self.assertEqual(native['context']['phase3_decision']['decision'], 'skip')
+        self.assertEqual(native['context']['phase3_decision']['expires_at'], original_expiry)
+        self.assertEqual(native['expire_at'], original_expiry)
+        self.assertEqual(self.gate.db.execute('SELECT state FROM proactive_generations ORDER BY rowid DESC').fetchone()[0], 'skipped')
+        self.assertEqual(len(self.private.model_calls), 2)
+        self.assertEqual(self.sends, [])
+
+    async def test_continuous_missing_or_nonfinite_candidate_expiry_never_generates(self):
+        self.continuous_gate()
+        for expiry in (0, None, float('inf'), float('nan'), self.now):
+            self.private.user['proactive_impulses'][0]['expire_at'] = expiry
+            self.assertEqual(await self.bridge.generate(self.private.user,'人','followup'), '')
+        self.assertEqual(self.private.model_calls, [])
+
+    async def test_continuous_legacy_candidate_requires_finite_expiry(self):
+        self.continuous_gate()
+        self.private._planned_proactive_impulse = lambda user:None
+        self.private._planned_proactive_delivery_key = lambda user:'legacy-plan'
+        self.private.user.update(planned_candidate_id='legacy-plan', planned_proactive_source='conversation')
+        self.assertEqual(await self.bridge.generate(self.private.user,'人','conversation'), '')
+        self.assertEqual(self.private.model_calls, [])
+
+    async def test_continuous_candidate_expiry_stops_remaining_bubbles(self):
+        self.continuous_gate()
+        expiry = self.now+30
+        self.private.user['proactive_impulses'][0]['expire_at'] = expiry
+        text = await self.bridge.generate(self.private.user,'人','followup')
+        checked = []
+        async def guarded_send(umo, text, *, delivery_id, is_current):
+            checked.append(is_current())
+            self.now = expiry
+            checked.append(is_current())
+            return {'state':'cancelled','delivered_text':'已经送达的合成首段。','sent_count':1,'part_count':2}
+        self.guard.send_proactive = guarded_send
+        outcome = await self.bridge.send(self.private.user['umo'], text)
+        self.assertEqual(checked, [True, False])
+        self.assertTrue(outcome.delivered)
+        self.assertFalse(outcome.complete)
+        self.assertEqual(self.gate.db.execute('SELECT state,sent_count,part_count FROM proactive_attempts').fetchone(), ('cancelled',1,2))
 
 
 class DecisionParsingTests(unittest.TestCase):

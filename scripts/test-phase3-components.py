@@ -26,7 +26,10 @@ PATTERNS=['test_phase3_runtime.py','test_phase3_staging.py','test_phase3_deliver
  'test_phase3_media_download_native.py','test_phase3_summary_consistency_native.py',
  'test_phase3_ingress_native.py','test_phase3_profile_acl_failure_native.py',
  'test_phase3_experience_release.py','test_phase3_profile_http_fixture.py','test_phase3_profile_render.py',
- 'test_phase3_profile_publication_native.py']
+ 'test_phase3_profile_publication_native.py','test_phase3_context_compression.py',
+ 'test_phase3_context_fallback.py','test_phase3_proactive_continuous.py',
+ 'test_phase3_proactive_pending.py','test_phase3_bubbles_v3_release.py','test_phase3_search_pending.py',
+ 'test_phase3_bubbles_history_audit.py']
 
 def child(pattern, output):
     sys.path[:0]=[str(ROOT),str(ROOT/'scripts'),str(ROOT/'.runtime/upstream/AstrBot')]

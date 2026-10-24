@@ -21,7 +21,7 @@
       "AstrBot",
       "炉石传说"
     ],
-    "description": "Operator-reviewed PUBLIC topic terms only; never private names or profile facts"
+    "description": "Legacy reviewed scope only; ignored in general_public. Never put private facts here."
   },
   "fetch_hosts": {
     "type": "list",
@@ -30,7 +30,13 @@
       "docs.astrbot.app",
       "hearthstone.blizzard.com"
     ],
-    "description": "Exact reviewed public hosts; no wildcard, private IP or URL credentials"
+    "description": "Legacy reviewed scope only; ignored in general_public. URL provenance and network safety always apply."
+  },
+  "scope": {
+    "type": "string",
+    "default": "reviewed",
+    "options": ["reviewed", "general_public"],
+    "description": "general_public removes fixed topic/host allowlists; keeps current-input provenance, privacy, URL/DNS safety and shared quotas. Missing scope preserves legacy reviewed behavior."
   },
   "daily_attempt_limit": {
     "type": "int",

@@ -19,6 +19,133 @@ async def public_dns(host):
     return ("1.1.1.1",)
 
 
+class GeneralPublicPolicyTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.policy = PublicPolicy(scope="general_public", resolver=public_dns)
+
+    def test_scope_requires_explicit_known_mode_and_legacy_default_is_closed(self):
+        for scope in (None, "", "general", "anything", True, [], {}):
+            with self.subTest(scope=scope), self.assertRaisesRegex(ValueError, "invalid_public_scope"):
+                PublicPolicy(scope=scope)
+        old = PublicPolicy(public_terms=["DeepSeek"])
+        self.assertEqual(old.scope, "reviewed")
+        self.assertEqual(old.query("DeepSeek 2026 官方文档"), "DeepSeek 2026 官方文档")
+        with self.assertRaisesRegex(Rejected, "unreviewed_public_terms"):
+            old.query("三体电影 最新", source_text="三体电影的新消息")
+
+    def test_new_public_topics_grounded_in_current_input(self):
+        cases = [
+            ("帮忙看一下上海明天天气怎么样", "上海 明天 天气"),
+            ("三体电影什么时候上映", "三体电影 什么时候上映 最新"),
+            ("Python 的 asyncio 怎么用", "Python asyncio 官方 文档"),
+            ("聊聊无人深空最近的更新", "无人深空 最新 更新"),
+            ("特斯拉最近价格是多少", "特斯拉最新价格"),
+            ("看看Python 3.12的官方变化", "Python 3.12 release notes"),
+        ]
+        for source, query in cases:
+            with self.subTest(query=query):
+                self.assertEqual(self.policy.query(query, source_text=source), query)
+
+    def test_old_configured_topics_do_not_bypass_general_provenance(self):
+        policy=PublicPolicy(scope="general_public", public_terms=["DeepSeek"], resolver=public_dns)
+        with self.assertRaisesRegex(Rejected, "query_not_grounded"):
+            policy.query("DeepSeek 最新", source_text="查一下三体电影")
+
+    def test_absent_oversize_or_nonstring_source_fails_closed(self):
+        for source in (None, "", [], "a"*32769):
+            with self.subTest(source_type=type(source).__name__), self.assertRaisesRegex(Rejected, "query_source_unavailable"):
+                self.policy.query("Python 官方文档", source_text=source)
+
+    def test_history_only_name_birthday_and_numbers_are_not_public_modifiers(self):
+        for query in ("Python Alice 最新", "Python SyntheticPrivateName", "Python 1998-04-02", "Python 29", "Python 3.12"):
+            with self.subTest(query=query), self.assertRaisesRegex(Rejected, "query_not_grounded"):
+                self.policy.query(query, source_text="查一下 Python 官方文档")
+
+    def test_cjk_whole_phrase_and_ascii_boundaries_not_bags_of_characters(self):
+        cases=[("紫月 最新", "看紫色月亮的介绍"),
+               ("紫 月 最新", "看紫色月亮的介绍"),
+               ("上海北京 新闻", "上海和北京有什么不同"),
+               ("Alice 最新", "malice 这个词什么意思"),
+               ("Python 12", "Python 312的版本")]
+        for query,source in cases:
+            with self.subTest(query=query), self.assertRaisesRegex(Rejected, "query_not_grounded"):
+                self.policy.query(query,source_text=source)
+
+    def test_neutral_modifiers_alone_are_not_a_topic(self):
+        with self.assertRaisesRegex(Rejected,"query_topic_missing"):
+            self.policy.query("最新 官方 文档",source_text="帮我查一下")
+
+    def test_private_memory_or_no_web_source_intent_blocks_public_looking_query(self):
+        for source in ("不要联网，告诉我 Python 怎么用", "只根据已保存资料回答 Python 问题", "你记得我的 Python 版本吗", "不要把聊天对外上传，聊聊 Python", "Use my private profile to find Python preferences"):
+            with self.subTest(source=source), self.assertRaises(Rejected):
+                self.policy.query("Python 官方文档", source_text=source)
+
+    async def test_only_trusted_keyword_source_is_accepted_extra_payload_is_stripped(self):
+        result=await self.policy.arguments(SEARCH, {
+            "query":"Python asyncio 官方文档", "ori_question":"private synthetic question",
+            "full_history":[{"role":"user","content":"private synthetic past"}],
+            "profile":"private synthetic fact", "source_text":"Alice secret source", "need_content":True,
+        }, source_text="查一下 Python asyncio")
+        self.assertEqual(result,{"query":"Python asyncio 官方文档","count":5,"need_content":False})
+        with self.assertRaisesRegex(Rejected,"query_source_unavailable"):
+            await self.policy.arguments(SEARCH,{"query":"Python","source_text":"Python"})
+        with self.assertRaisesRegex(Rejected,"query_not_grounded"):
+            await self.policy.arguments(SEARCH,{"query":"Python Alice","source_text":"Python Alice"},
+                                        source_text="查一下 Python")
+
+    def test_general_still_rejects_secrets_controls_and_unsupported_filters(self):
+        for query in ("Python sk-synthetic", "Python alice@example.org", "Python 13812345678", "Python\n文档", "Python site:example.org", "Python %41lice"):
+            with self.subTest(query=query), self.assertRaises(Rejected):
+                self.policy.query(query,source_text=query)
+
+    async def test_any_safe_new_domain_is_allowed_without_host_allowlist(self):
+        for url in ("https://public.example.net/astronomy", "https://another.example.org/docs/v3.12", "http://1.1.1.1/public"):
+            with self.subTest(url=url):self.assertEqual(await self.policy.url(url),url)
+        old=PublicPolicy(fetch_hosts=["docs.example.org"],resolver=public_dns)
+        with self.assertRaisesRegex(Rejected,"unreviewed_fetch_host"):
+            await old.url("https://public.example.net/astronomy")
+
+    async def test_encoded_private_path_or_host_and_control_bytes_are_rejected(self):
+        for url in ("https://public.example.net/%70%61ssword", "https://public.example.net/%2573%256b-synthetic", "https://%70%61ssword.example.org/path", "https://private-token.example.org/path", "https://public.example.net/a%0Ab", "https://public.example.net/a%255cb", "https://public.example.net/a%3Ftoken=x", "https://public.example.net/%FF"):
+            with self.subTest(url=url), self.assertRaises(Rejected):await self.policy.url(url)
+
+    async def test_credentials_ports_queries_fragments_local_and_ambiguous_hosts_rejected(self):
+        for url in ("https://user:pass@public.example.net/a", "https://public.example.net:8443/a", "https://public.example.net/a?auth=synthetic", "https://public.example.net/a#x", "https://localhost/a", "https://service.local/a", "http://2130706433/a", "http://0x7f000001/a", "https://-bad.example.net/a", "http://[2606:4700:4700::1111%eth0]/a", "http://[2606:4700:4700::1111%25eth0]/a"):
+            with self.subTest(url=url), self.assertRaises(Rejected):await self.policy.url(url)
+
+    async def test_private_mixed_multicast_and_reserved_dns_remain_blocked(self):
+        for addresses in (("127.0.0.1",), ("1.1.1.1","10.1.2.3"), ("224.0.0.1",), ("::ffff:127.0.0.1",), ("100.64.0.1",), ("192.0.2.1",)):
+            async def resolver(host):return addresses
+            policy=PublicPolicy(scope="general_public",resolver=resolver)
+            with self.subTest(addresses=addresses), self.assertRaises(Rejected):
+                await policy.url("https://public.example.net/a")
+
+    async def test_empty_dns_result_is_rejected(self):
+        async def empty_dns(host): return ()
+        policy = PublicPolicy(scope="general_public", resolver=empty_dns)
+        with self.assertRaisesRegex(Rejected, "dns_empty"):
+            await policy.url("https://public.example.net/a")
+
+    async def test_encoded_path_privacy_hardening_also_applies_to_reviewed_mode(self):
+        policy=PublicPolicy(fetch_hosts=["docs.example.org"],resolver=public_dns)
+        with self.assertRaisesRegex(Rejected,"private_url"):
+            await policy.url("https://docs.example.org/%2573%256b-synthetic")
+
+    def test_scope_switch_does_not_reset_persisted_daily_attempts(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path=Path(directory)/"budget.sqlite3"
+            old=PublicPolicy(public_terms=["DeepSeek"])
+            budget=DailyBudget(path,limit=1,day=lambda:"2026-10-24")
+            self.assertEqual(old.query("DeepSeek 官方文档"),"DeepSeek 官方文档")
+            self.assertTrue(budget.reserve());budget.close()
+            new=PublicPolicy(scope="general_public")
+            self.assertEqual(new.query("Python 文档",source_text="查询 Python"),"Python 文档")
+            budget=DailyBudget(path,limit=1,day=lambda:"2026-10-24")
+            self.assertFalse(budget.reserve())
+            self.assertEqual(budget.db.execute("SELECT attempts FROM web_daily_attempts").fetchone()[0],1)
+            budget.close()
+
+
 class Event:
     message_str = "请查 DeepSeek 官方文档"
     def __init__(self, turn="turn-1", user="10001", private=True):
@@ -167,6 +294,47 @@ class SearchTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(native.calls, [])
         self.assertEqual(self.generated, [])
 
+    async def test_general_runtime_uses_guard_grouped_input_not_injected_message_or_args(self):
+        self.runtime.policy = PublicPolicy(scope="general_public", resolver=public_dns)
+        self.event.set_extra("phase3_grouped_text", "查询 Python asyncio 官方文档")
+        self.event.message_str = "查询 Python asyncio，附加历史里的 SyntheticPrivateName 1998-04-02"
+        native = Native()
+        await self.execute(native, args={"query": "Python asyncio 文档",
+                                        "ori_question": "SyntheticPrivateName 1998-04-02"})
+        self.assertEqual(native.calls, [{"query": "Python asyncio 文档", "count": 5, "need_content": False}])
+        for query in ("Python SyntheticPrivateName", "Python 1998-04-02"):
+            blocked = Native()
+            result = await self.execute(blocked, args={"query": query, "source_text": self.event.message_str})
+            self.assertIn("query_not_grounded_in_current_input", result)
+            self.assertEqual(blocked.calls, [])
+        self.assertEqual(len(self.generated), 1)
+
+    async def test_general_runtime_grouped_no_web_remains_authoritative(self):
+        self.runtime.policy = PublicPolicy(scope="general_public", resolver=public_dns)
+        self.event.set_extra("phase3_grouped_text", "不要联网，只根据资料聊 Python")
+        self.event.message_str = "请搜索 Python 官方文档"
+        native = Native()
+        result = await self.execute(native, args={"query": "Python 文档", "source_text": self.event.message_str})
+        self.assertIn("user_forbids_web", result)
+        self.assertEqual(native.calls, [])
+        self.assertEqual(self.generated, [])
+
+    async def test_general_fetch_without_guard_source_is_blocked_before_dns(self):
+        dns_calls = []
+        async def counted_dns(host):
+            dns_calls.append(host)
+            return ("1.1.1.1",)
+        self.runtime.policy = PublicPolicy(scope="general_public", resolver=counted_dns)
+        self.event.set_extra("phase3_grouped_text", "查询 Python 官方文档")
+        url = "https://hidden-name.public.example.net/1998-04-02"
+        self.event.message_str = "附加历史 URL " + url
+        native = Native(FETCH)
+        result = await self.execute(native, args={"url": url, "source_text": "请阅读 " + url})
+        self.assertIn("fetch_url_has_no_public_source", result)
+        self.assertEqual(dns_calls, [])
+        self.assertEqual(native.calls, [])
+        self.assertEqual(self.generated, [])
+
     async def test_private_url_zero_calls(self):
         for url in ("http://127.0.0.1/a", "http://169.254.169.254/latest/meta-data", "file:///etc/passwd", "https://u:p@docs.example.org/", "https://docs.example.org/?token=private", "https://docs.example.org/a#secret"):
             native = Native(FETCH)
@@ -175,12 +343,25 @@ class SearchTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.generated, [])
 
     async def test_dns_private_and_mixed_are_rejected(self):
+        self.event.set_extra("phase3_grouped_text", "请阅读 https://docs.example.org/public")
         for addresses in (("10.0.0.1",), ("1.1.1.1", "192.168.1.1"), ("::1",), ("100.64.0.1",)):
             async def resolver(host): return addresses
             self.runtime.policy.resolver = resolver
             native = Native(FETCH)
-            await self.execute(native, args={"url":"https://docs.example.org/public"})
+            result = await self.execute(native, args={"url":"https://docs.example.org/public"})
+            self.assertIn("nonpublic_address", result)
             self.assertEqual(native.calls, [])
+        self.assertEqual(self.generated, [])
+
+    async def test_general_dns_failure_is_sanitized_and_blocks_before_external_tools(self):
+        async def failed_dns(host): raise OSError("synthetic sensitive DNS error")
+        self.runtime.policy = PublicPolicy(scope="general_public", resolver=failed_dns)
+        self.event.set_extra("phase3_grouped_text", "请阅读 https://public.example.net/docs")
+        native = Native(FETCH)
+        result = await self.execute(native, args={"url": "https://public.example.net/docs"})
+        self.assertIn("address_validation_unavailable", result)
+        self.assertNotIn("sensitive", result)
+        self.assertEqual(native.calls, [])
         self.assertEqual(self.generated, [])
 
     async def test_progress_timeout_error_empty_invalid_fallback(self):

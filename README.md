@@ -8,6 +8,24 @@
 
 ## Phase 3 当前上线与验收
 
+2026-10-24最新：[清洁开始与统一r4发布](docs/phase3-fresh-start-release.md)。已保留小鲸V0.2、获准L1 3组/L2 12组、登录态与配置，清理旧AI聊天、聊天派生记忆及旧聊天备份；以后新聊天正常记录。r4的13个代码文件＋5份配置已安装，包括C/80轮压缩、长期主动、新气泡提示词、V3.1与通用公开搜索。固定镜像容器已重新创建，**05:10:10 +08:00启动健康与QQ/OneBot连接核对PASS**。未增加真实API或QQ实验。
+
+最新安装的长期主动为北京时间09:00–23:59、每日最多5次发送尝试及5次模型评估、间隔至少3小时，无72小时截止。保留公开搜索3/60额度与隐私校验；QQ客户端加密消息库因登录态保留，不能称所有QQ端历史都已删除。旧备份不可用于恢复已清除聊天，代码配置回滚及新的清洁基线见发布记录。
+
+### 本次清理之前的历史发布与验收记录
+
+下面保留每次开发和当时状态；其中“待发布/关闭/旧原文保持”等不是上述新安装的当前状态，逐项验收层级与用户豁免不因此改变。
+
+2026-10-24 [V3.1 多气泡清理兼容](docs/phase3-multibubble-v31-validation.md)：100字符内、2–4完整句、短句合并，最终仅切分原生清理后的正文；不恢复删除的句号或被拦截内容。本地验证完成后用户已授权同步到统一待发布 r4，结果以[同步回执](docs/phase3-pending-sync.md)为准；保持不应用、不重启。
+
+2026-10-24[通用公开搜索候选](docs/phase3-public-search-validation.md)取消三个主题与域名白名单，保留每轮3次/每天60次、私料保护与URL/DNS校验；当前运行实例仍是旧范围，新候选按要求只同步、不重启。
+
+最新同步流程：C/80轮、长期主动、新多气泡提示词及通用公开搜索合入VPS统一待发布候选，未来本地更新同样同步，等待用户通知后统一生效。同步不修改运行文件或重启，详见[统一候选与同步约定](docs/phase3-pending-sync.md)。
+
+2026-10-24多气泡V3增量见[专项记录](docs/phase3-multibubble-v3-validation.md)：148项组件/发布测试及23项完整隔离联调通过；核心人格为V0.2，提示词保持原样。Guard增量已安装，但此次AstrBot重启违反用户“先保存、不重启”的要求，已停止后续发布；V3真实QQ自然度尚未验收。后续配置仅保存，等待明确通知统一生效。
+
+2026-10-24待生效调整：[Token摘要压缩及失败回退80轮](docs/phase3-context-compression.md)、[长期主动规则](docs/phase3-proactive-continuous.md)均已单独保存。主动候选为北京时间09:00–23:59、每天5次尝试、至少3小时、每天5次模型评估（跳过/延后也计数），取消72小时截止；按要求不重启，等后续统一生效。
+
 Phase 3 已在用户批准范围内完成首轮受限上线：V0.1 人格、自然文本、自动记忆、多气泡和三个审核主题的 Search/Fetch 已启用。**整体仍为 PARTIAL**。真实 QQ 普通回复、两个自然气泡、搜索前回应→Search/Fetch→最终回答已有发送和归档证据；旧22条获准历史已自动摘要且原文指纹保持。本人已批准的L1 3组、L2 12组资料完成窄导入和来源核对，此前真实资料抽样多次失败；V2 r2及后续原生上下文修复、完整自动回归后，最新真实资料验收已本人确认通过；L3未导入，首次主动窗口尚未开启，后台搜索关闭。
 
 多气泡复用 PrivateCompanion 原协议，单次主模型生成，Guard 逐条发送和记账。用户确认实际两条回复“自然，没有重复内容”。连续输入自测反馈保留，但本轮实际审计没有三个来源归组的证据，重复测试按用户要求跳过；新版图片完成原生/真实Flash合成验证，真实QQ单图及追问已获本人确认；小字/两图实测由用户豁免。资料准确性、完整真实联合和主动验收仍各自有门槛。
@@ -76,9 +94,11 @@ bash scripts/test-future-tasks.sh
 
 ## 配置、人格与数据
 
+2026-10-24：[会话Token摘要压缩](docs/phase3-context-compression.md)已随统一r4安装。取消固定20轮限制，摘要失败回退最近最多80轮；启动加载核对见[本次发布记录](docs/phase3-fresh-start-release.md)。
+
 主要配置为 [config/offline.json](config/offline.json)。启动前进行字段检查，离线 profile 只接受 loopback OneBot/LLM 地址、明确的测试凭据、合成身份白名单和 `Asia/Shanghai` 时区。`.env.example` 不包含真实密钥；脚本不会自动加载其中变量。
 
-人格模板位于 [persona/core_persona.md](persona/core_persona.md) 和 [persona/relationship.md](persona/relationship.md)。入口实际读取 `<ASTRBOT_ROOT>/persona.md`，再通过 AstrBot persona API 更新 system prompt；需要使用项目模板时，将所需模板内容放入该文件。资料示例 [user_profile.example.md](persona/user_profile.example.md) 是合成说明，不会自动成为用户事实。
+当前 Phase 3 生产核心为用户确认的 [V0.2 人格](persona/phase3-v0.2.md)，接入与回退见[人格说明](docs/persona-integration.md)。以下旧模板入口仅描述 Phase 1：模板位于 [persona/core_persona.md](persona/core_persona.md) 和 [persona/relationship.md](persona/relationship.md)，读取 `<ASTRBOT_ROOT>/persona.md` 后通过 AstrBot persona API 更新 system prompt。资料示例 [user_profile.example.md](persona/user_profile.example.md) 是合成说明，不会自动成为用户事实。
 
 集成验收有意使用带 `PERSONA_ALPHA` / `PERSONA_BETA` 标记的外置合成人格，以真实模型请求验证修改和重启生效。Mock 回复只能验证请求链路，不能评价人格自然度、亲密关系表现或模型能力。
 

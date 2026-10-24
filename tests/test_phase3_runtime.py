@@ -14,7 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "scripts"))
 from integrations.phase3_runtime.persona import render_persona, install_persona, MARKER
-from integrations.phase3_runtime.settings import validate_settings, private_config
+from integrations.phase3_runtime.settings import validate_settings, private_config, continuous_proactive_candidate
 from integrations.phase3_runtime.proactive import ProactiveGate, approved_window_after_passive, native_proactive_config
 from integrations.phase2_policy.policy import validate_policy, PolicyViolation
 from integrations.phase2_policy.redaction import CredentialRedactor
@@ -58,6 +58,28 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(manager.prompt, prompt)
         self.assertEqual(manager.kw, {"tools": [], "skills": []})
 
+    async def test_v02_replaces_same_persona_and_rejects_mixed_authorities(self):
+        from integrations.phase3_runtime.persona import CURRENT_TEMPLATE
+        template = (ROOT / "persona" / CURRENT_TEMPLATE).read_text()
+        prompt = render_persona(template, "合成用户")
+        self.assertEqual(prompt.count("合成用户"), 3)
+        self.assertNotIn("{{preferred_address}}", prompt)
+        self.assertNotIn(MARKER, prompt)
+        class Manager:
+            personas = [SimpleNamespace(persona_id="qq_companion")]
+            async def update_persona(self, name, system_prompt, **kw):
+                self.name, self.prompt, self.kw = name, system_prompt, kw
+        manager = Manager()
+        receipt = await install_persona(manager, prompt, tools=["existing_tool"])
+        self.assertEqual(receipt["version"], "0.2")
+        self.assertEqual((manager.name, manager.prompt), ("qq_companion", prompt))
+        self.assertEqual(manager.kw, {"tools": ["existing_tool"], "skills": []})
+        for invalid in (template + MARKER, template + "[QQ_COMPANION_PERSONA_V0_2]",
+                        template.replace("V0_2", "V9_9"),
+                        template.replace("{{preferred_address}}", "替换", 1)):
+            with self.assertRaises(ValueError):
+                render_persona(invalid, "合成用户")
+
     def test_host_schema_retains_approved_proactive_window(self):
         import json
         try:
@@ -71,8 +93,30 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
                         "proactive_window": {"window_start": 2000000000, "window_end": 2000003600, "max_per_day": 1, "cooldown": 14400, "quiet_hours": [23,9]}}
             path.write_text(json.dumps(original))
             cfg = AstrBotConfig(str(path), schema=schema)
+            expected = {**original["proactive_window"], "mode": "trial", "max_generations_per_day": 0}
+            self.assertEqual(cfg["proactive_window"], expected)
+            self.assertEqual(validate_settings(cfg)["proactive_window"],
+                             {**expected, "max_generations_per_day": 1})
+            self.assertEqual(cfg["proactive_window"]["max_generations_per_day"], 0)
+
+    def test_host_schema_preserves_continuous_pending_policy(self):
+        import json
+        try:
+            from astrbot.core.config.astrbot_config import AstrBotConfig
+        except ImportError:
+            self.skipTest("pinned AstrBot required for schema test")
+        schema = json.loads((ROOT / "integrations/phase3_runtime/_conf_schema.json").read_text())
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "runtime.json"
+            original = continuous_proactive_candidate({"enabled": True, "persona": True,
+                                                       "context_compression_fallback_turns": 80})
+            path.write_text(json.dumps(original))
+            cfg = AstrBotConfig(str(path), schema=schema)
             self.assertEqual(cfg["proactive_window"], original["proactive_window"])
-            self.assertEqual(validate_settings(cfg)["proactive_window"], original["proactive_window"])
+            validated = validate_settings(cfg)
+            self.assertEqual(validated["proactive_window"], original["proactive_window"])
+            self.assertEqual(validated["context_compression_fallback_turns"], 80)
+            self.assertFalse(validated["proactive"])
 
     def test_host_config_runtime_locks_are_not_copied(self):
         class HostConfig(dict):
@@ -89,6 +133,15 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         for config in ({"enabled": "true"}, {"persona": True}, {"enabled": True, "search": True}, {"background_web": True}):
             with self.assertRaises(ValueError):
                 validate_settings(config)
+
+    def test_context_fallback_limit_is_explicit_bounded_and_disabled_by_default(self):
+        import json
+        schema = json.loads((ROOT / 'integrations/phase3_runtime/_conf_schema.json').read_text())
+        self.assertEqual(schema['context_compression_fallback_turns']['default'], 0)
+        self.assertEqual(validate_settings({'context_compression_fallback_turns': 80})['context_compression_fallback_turns'], 80)
+        for limit in (True, -1, 201, '80', 80.5):
+            with self.assertRaises(ValueError):
+                validate_settings({'context_compression_fallback_turns': limit})
 
     def test_disable_conflicting_native_paths_without_mutating_original(self):
         cfg = {"enable_message_debounce": True, "nested": {"enable_daily_plan": True, "enable_group_privacy_guard": True}}
@@ -273,9 +326,41 @@ class ApprovedProactiveWindowTests(unittest.IsolatedAsyncioTestCase):
         schema=json.loads((ROOT/'integrations/phase3_runtime/_conf_schema.json').read_text())
         example=json.loads((ROOT/'config/phase3-release.example.json').read_text())
         self.assertEqual(schema['proactive_window']['items']['quiet_hours']['default'],[23,9])
-        self.assertEqual(example['proactive_window']['quiet_hours'],[23,9])
+        self.assertEqual(example['proactive_window']['mode'],'continuous')
+        self.assertEqual(example['proactive_window']['quiet_hours'],[0,9])
+        self.assertEqual(example['proactive_window']['max_per_day'],5)
+        self.assertEqual(example['proactive_window']['max_generations_per_day'],5)
         self.assertFalse(example['proactive'])
         self.assertEqual(native_proactive_config({},'10001')['basic_config']['quiet_hours'],'23:00-09:00')
+
+
+class ContinuousProactiveSettingsTests(unittest.TestCase):
+    def test_candidate_preserves_other_pending_settings_without_enabling(self):
+        original = dict(enabled=True, persona=True, natural_chat=True, memory=True,
+                        proactive=False, context_compression_fallback_turns=80,
+                        memory_topic_aliases={'games':['游戏']})
+        before = copy.deepcopy(original)
+        candidate = continuous_proactive_candidate(original)
+        self.assertEqual(original, before)
+        self.assertFalse(candidate['proactive'])
+        self.assertEqual(candidate['context_compression_fallback_turns'], 80)
+        self.assertEqual(candidate['memory_topic_aliases'], original['memory_topic_aliases'])
+        self.assertEqual(candidate['proactive_window'], dict(mode='continuous',window_start=0,window_end=0,
+            max_per_day=5,max_generations_per_day=5,cooldown=10800,quiet_hours=[0,9]))
+        self.assertEqual(validate_settings({**candidate, 'proactive':True})['proactive_window'], candidate['proactive_window'])
+        with self.assertRaises(ValueError): continuous_proactive_candidate({**original, 'proactive':True})
+
+    def test_continuous_limits_reject_broadening_and_unintended_expiry(self):
+        candidate = continuous_proactive_candidate(dict(enabled=True,persona=True,natural_chat=True,proactive=False))
+        mutations = ({'max_per_day':6},{'max_per_day':True},{'max_generations_per_day':6},
+                     {'max_generations_per_day':True},{'cooldown':10799},{'cooldown':float('nan')},
+                     {'window_start':1},{'window_end':1000},{'quiet_hours':[0,8]},
+                     {'quiet_hours':[23,9]},{'quiet_hours':[False,9]})
+        for change in mutations:
+            with self.subTest(change=change),self.assertRaises(ValueError):
+                validate_settings({**candidate,'proactive_window':{**candidate['proactive_window'],**change}})
+        with self.assertRaises(ValueError):
+            validate_settings({**candidate,'proactive':True,'proactive_window':{**candidate['proactive_window'],'mode':'unknown'}})
 
 
 if __name__ == "__main__":

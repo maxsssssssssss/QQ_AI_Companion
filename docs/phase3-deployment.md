@@ -1,5 +1,70 @@
 # Phase 3 发布与回滚操作说明
 
+## 2026-10-24 清洁开始与统一r4正式安装
+
+用户已明确批准保留V0.2人格、L1/L2、登录态与配置，清除旧聊天、聊天派生记忆及旧聊天备份，并发布最新版。停写候选清理/13库完整性及隔离恢复、11文件窄替换、32旧文件删除、r4的13代码＋5配置安装和旧备份清理已完成。同一固定镜像的两个容器已重新创建；05:10:10 +08:00启动健康、QQ/OneBot及实际配置核对**PASS**。
+
+最新操作说明与代码配置回滚入口统一见[清洁开始发布记录](phase3-fresh-start-release.md)。本次独立r4安装器不改旧V3控制器，不绕过其JSON字节校验；旧缺口暂不修复。旧含聊天快照已按本次授权删除，只保留清洁基线，因此下文旧备份路径仅代表当时证据，不能继续作为可恢复旧聊天的入口。
+
+下文“不重启/待生效/OFF”的段落属于本次明确发布授权之前的历史状态；本次安装的C/80轮、长期主动、新气泡提示词、V3.1及general_public以最新发布收据为准。
+
+通用公开搜索只用 `scripts/phase3-search-config.py --source-config <600的phase3_search_config.json> --output-dir <全新私有目录>` 准备范围差异，不用全量stage改写现有生产。它保留身份/开关/限额，只改scope及两个旧名单字段。同步位置与回退要求见[通用公开搜索](phase3-public-search-validation.md)。新源码和general_public配置必须在获准统一生效时一起窄应用，原预算数据库保持；现在不执行应用或重启。
+
+2026-10-24最新同步要求：将C/80轮、长期主动、新多气泡提示词及通用公开搜索合成一份服务器待发布候选，后续本地更新也同步；不修改运行目录、不热重载、不重启，等用户通知再统一生效。候选路径、核验回执与后续约定见[统一待发布同步](phase3-pending-sync.md)。下文“仅本地保存”描述提示词更新当时的历史状态，最新同步状态以该候选回执为准。
+
+**当前变更方式：继续遵守用户2026-10-24“先保存、不重启、后面一起生效”的指令。** 本轮执行错误地把V3任务中的“部署候选”理解为覆盖该限制，实际安装V3并重启AstrBot一次；用户随后明确指出“没让你重启”。此次重启未获用户授权，属于执行偏差，不能描述为明确获准的独立发布。后续只保存，待用户明确批准统一生效；当前不得继续部署、回滚、重启或通过热重载提前应用改动。方案C压缩和长期主动两份候选仍未应用。下述模型参数发布及其AstrBot重启已在原“不重启”指令到达前完成，保留为历史记录。
+
+2026-10-24新增待生效候选：方案C（取消20轮限制、原生Token摘要压缩、128000操作预算、最近15%完整上下文），摘要失败回退最近最多80轮并继续Token保护。配置与最小Runtime适配只保存为候选，未写入运行目录；不因本地staging默认值已更新而视作生产已生效。隔离证据、触发时机与后续字段合并要求见[会话压缩候选](phase3-context-compression.md)。
+
+2026-10-24后续[长期主动候选](phase3-proactive-continuous.md)同样仅保存：无72小时截止，上海09:00–23:59，每日5次尝试、至少3小时；独立每日5次模型评估，skip/defer也计入。新候选继承已核验的80轮fallback，保留旧压缩候选，运行配置和容器不变。未来统一生效需合并两份候选，不能覆盖旧完整配置；本次未启用主动或迁移capability。下文72小时窗口继续作为历史证据，不再是待生效规则。
+
+2026-10-24 后续人格替换：`phase3-20261024-persona-v02-r1` 已将当前核心改为用户原文 V0.2。仅覆盖模板和渲染器，使用新的AstrBot停写备份及16库隔离恢复；旧资料修复发布继续作为代码基线，其固定哈希校验不包含这次覆盖。回退范围和生效核验见[人格接入](persona-integration.md#v02-替换与生效核验)。
+
+2026-10-24后续提示词候选仅在本地保存：用户提供的新`[Phase3 自然多气泡]`全文、示例说明及去重标识同步；控制分隔符不变。未上传或应用到VPS，线上旧提示词保持，等待用户明确通知统一生效；详见[提示词候选](phase3-multibubble-v3-validation.md#后续提示词更新仅本地保存未生效)。不得直接重用已发布V3包的旧hash或将本地新源码视为生产已加载。
+
+## 2026-10-24 自然多气泡V3实际安装与执行偏差
+
+`phase3-20261024-multibubble-v3-r1`已安装，控制器回执为`INSTALLED_AWAITING_HEALTH_AND_QQ`。本次仅替换Guard的`main.py`、`bubbles.py`、`_conf_schema.json`，并在`data/config/phase1_guard_config.json`中新增`phase3_casual_split_fallback_enabled=true`。保留原配置其余字段及UTF-8 BOM，安装前核对当前完整受保护文件清单，未套用旧47文件基线。
+
+按用户随后“提示词暂时不改”的要求，原489字符分段提示词及人格正文原样保留；核心人格仍为V0.2，分段附加说明中的V0.1文字仅是本轮未修改的遗留引用。DeepSeek Flash继续Thinking Off，AstrBot全局`segmented_reply`关闭。Runtime、cmd_config、人格、资料和凭据均不随本包覆盖；主动仍关闭。此前`phase3-20261024-context-compression-r2`与`phase3-20261024-proactive-continuous-r1`两份待生效目录保持原样，不因本次重启变为已启用。
+
+本次实际停止/启动原AstrBot一次，NapCat未重启。用户未授权这次重启；窄变更、备份通过或“部署候选”的措辞都不能替代此前明确的“不重启”约束。已停止进一步部署/回滚/重启，不能为撤销本次偏差而擅自再重启一次。新停写快照`phase3-multibubble-v3-20261024-r1`的16个SQLite完整性和隔离恢复均PASS，恢复副本未启动；通过后才写入上述四文件。发布回执位于`evidence/phase3/multibubble-v3-20261024/production-install-r1.json`。健康核验与新增真实QQ体验需分别记录；安装成功和备份PASS不代表本次QQ或自然度验收通过，详见[V3专项记录](phase3-multibubble-v3-validation.md)。
+
+四文件原件和校验记录保存在`/opt/qq-ai-companion/releases/phase3-20261024-multibubble-v3-r1/source/bubbles-v3-journal`。独立关闭兜底的配置入口为`phase3_casual_split_fallback_enabled=false`，模型原生语义分段可保留；该变更现在也不能自动应用。后续只读核对发现AstrBot规范化Guard JSON序列化，语义与候选一致但严格字节哈希不符；现有回滚控制器会拒绝，需要先在本地补齐等价序列化校验及测试。以下命令仅保留为修复此门禁且以后获得明确批准时的恢复参考，当前不得执行回滚或重启。完整V3回退使用同包控制器，先运行只读计划：
+
+```bash
+v3_source=/opt/qq-ai-companion/releases/phase3-20261024-multibubble-v3-r1/source
+v3_rollback_run=phase3-multibubble-v3-rollback-20261024-r1
+sudo -n env PYTHONDONTWRITEBYTECODE=1 python3 "$v3_source/scripts/phase3-deploy-bubbles-v3.py" \
+  --source "$v3_source" --deployment /opt/qq-ai-companion/deployment \
+  --run-id "$v3_rollback_run" --rollback
+```
+
+以后获得用户明确回滚授权，并确认计划仍对应当前已安装版本后，才可在同一入口显式执行：
+
+```bash
+sudo -n env PYTHONDONTWRITEBYTECODE=1 python3 "$v3_source/scripts/phase3-deploy-bubbles-v3.py" \
+  --source "$v3_source" --deployment /opt/qq-ai-companion/deployment \
+  --run-id "$v3_rollback_run" --rollback --apply
+```
+
+上述run-id仅作首次回退示例；每次实际回退必须使用新的日期/序号，不能复用已有备份或操作记录。控制器共用`.astrbot-runtime-release.lock`，回退前再次停AstrBot、新建一致快照并完成隔离恢复，然后只恢复journal中的四个文件；配置或源码有后续漂移即拒绝覆盖。它不恢复数据库、不删除新聊天、不覆盖整个data、不更改两份待生效候选，也不重启NapCat。回退完成后仍需核对服务健康与实际聊天。
+
+## 2026-10-24 主模型参数更新
+
+用户要求的当前参数如下；Phase 3 staging 同步生成这些值，Phase 2 历史初始化模板保持原值。
+
+| 参数 | 当前值 | 生产字段 |
+|---|---:|---|
+| Flash单次最大输出 | 8192 tokens | `provider[id=deepseek/flash].custom_extra_body.max_tokens` |
+| 主模型请求超时 | 120秒 | `provider_sources[id=deepseek].timeout`；模型有同名覆盖时同步 |
+| 会话请求频率 | 40次/60秒 | `platform_settings.rate_limit`，保留原`discard`策略 |
+| Agent最大步数 | 10 | `agent_runner.config.misc.max_steps` |
+
+频率是固定AstrBot对每个`unified_msg_origin`的入站消息限流，不是DeepSeek账户的全局HTTP请求RPM。120秒是SDK请求超时，不是整轮Agent总时长；原生Agent步数耗尽后仍可追加一次无工具final收尾。独立补答、搜索工具、后台整理的局部预算保持原值，Pro仍停用，未增加测试费用或发送消息。
+
+本次发布为 `phase3-20261024-model-limits-r1`，仅修改`cmd_config.json`和第一方启动校验`policy.py`，将门禁上界同步为8192/10。新备份和隔离恢复、启动生效值及QQ连接以私有`evidence/phase3/model-limits-20261024/`回执为准。回退应停AstrBot后按该发布journal恢复两个文件并重启，不恢复整个数据目录；人格V0.2及已有聊天保留。旧版本发布器固定的配置/源码摘要不包含本次变化，不能用旧快照覆盖当前配置。
+
 用户已集中批准首轮受限上线。生产仍使用 Phase2 锁定镜像，已增量启用 V0.1、自然文本、自动记忆、多气泡、受限 Search/Fetch；不再处于“等待全部部署授权”。实际状态与验收层级见 [P01–P36](phase3-validation.md)。
 
 ## 当前授权与已完成切换

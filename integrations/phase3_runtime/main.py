@@ -37,6 +37,23 @@ class Phase3Runtime(Star):
     def policy_capabilities(self):
         return {"search": self.settings.get("search", False)}
 
+    @filter.on_agent_begin(priority=1800000)
+    async def prepare_context_fallback(self, event, run_context):
+        limit = self.settings.get("context_compression_fallback_turns", 0)
+        if not limit or not self.ready or not self.guard or not self.guard.turn_is_current(event):
+            return
+        try:
+            from .context_compression import install_for_run
+            installed = install_for_run(event, run_context, limit)
+            self.guard.trace(event, 'model_request',
+                             {'context_compression': {'fallback_turns': limit, 'installed': installed}})
+            if not installed:
+                logger.warning('Phase3 context fallback unavailable; native token protection retained')
+        except Exception as exc:
+            # This optional limit must not block chat or alter the native token
+            # safety check. Cancellation is intentionally not caught here.
+            logger.warning('Phase3 context fallback unavailable: %s', type(exc).__name__)
+
     def memory_tool_names(self):
         return sorted(MEMORY_TOOLS) if self.prepared and self.memory else []
 

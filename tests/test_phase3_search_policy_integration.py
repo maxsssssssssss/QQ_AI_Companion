@@ -36,6 +36,7 @@ if NATIVE_AVAILABLE:
     os.environ["ASTRBOT_DISABLE_METRICS"] = "1"
     os.environ.setdefault("ASTRBOT_ROOT", tempfile.mkdtemp(prefix="qq-search-policy-"))
     from astrbot.api.star import StarTools
+    from astrbot.api import AstrBotConfig
     from astrbot.core.db.sqlite import SQLiteDatabase
     from astrbot.core.persona_mgr import PersonaManager
     from astrbot.core.provider.entities import ProviderRequest
@@ -155,6 +156,27 @@ class PolicyPersistenceTests(unittest.IsolatedAsyncioTestCase):
         await self.start()
         self.assertEqual((await self.context.persona_manager.get_persona("qq_companion")).system_prompt, original)
         self.assertEqual(await self.assert_ready_persona(), original)
+
+    async def test_search_scope_roundtrips_native_config_with_legacy_default(self):
+        schema = json.loads((ROOT / 'integrations/phase3_search/_conf_schema.json').read_text())
+        path = self.root / 'synthetic-search-config.json'
+        cfg = AstrBotConfig(str(path), schema=schema)
+        self.assertEqual(cfg['scope'], 'reviewed')
+        cfg.update(scope='general_public', public_terms=[], fetch_hosts=[],
+                   enabled=True, admin_id='10001', platform_id='napcat')
+        cfg.save_config()
+        reopened = AstrBotConfig(str(path), schema=schema)
+        search = Phase3Search(self.context, reopened)
+        self.assertEqual(search.public_policy.scope, 'general_public')
+        self.assertEqual(search.public_policy.terms, ())
+        self.assertEqual(search.public_policy.hosts, frozenset())
+        self.assertEqual(reopened['daily_attempt_limit'], 60)
+        self.assertIsNone(search.runtime)
+
+    async def test_unknown_search_scope_cannot_initialize_plugin(self):
+        for value in ('unrestricted', '', None, True, 1, []):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                Phase3Search(self.context, dict(enabled=True, scope=value))
 
     async def test_core_only_exposed_to_exact_authorized_private_event(self):
         await self.assert_ready_persona()

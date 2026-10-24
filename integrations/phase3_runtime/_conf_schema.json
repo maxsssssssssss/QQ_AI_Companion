@@ -32,12 +32,17 @@
   "proactive": {
     "type": "bool",
     "default": false,
-    "description": "Requires real passive acceptance, then an explicitly dated 72-hour approved trial"
+    "description": "Operator activation switch; supports dated trial or explicitly configured continuous operation. Pending policy does not enable sending."
   },
   "background_web": {
     "type": "bool",
     "default": false,
     "description": "Not enabled in this release"
+  },
+  "context_compression_fallback_turns": {
+    "type": "int",
+    "default": 0,
+    "description": "Native summary failure only: retain at most this many complete recent rounds before the token safety check; 0 disables this adapter. Pending approved value: 80."
   },
   "preferred_address": {
     "type": "string",
@@ -46,8 +51,13 @@
   },
   "proactive_window": {
     "type": "object",
-    "description": "After real passive PASS only: next Asia/Shanghai 09:00 for 72 hours; Unix seconds",
+    "description": "Trial retains dated expiry. Continuous: mode=continuous, start/end=0, max_per_day=5, max_generations_per_day=5, cooldown=10800, quiet_hours=[0,9].",
     "items": {
+      "mode": {
+        "type": "string",
+        "default": "trial",
+        "description": "trial is the compatibility default for existing dated configurations; continuous has no scheduled expiry."
+      },
       "window_start": {
         "type": "int",
         "default": 0
@@ -70,7 +80,12 @@
           23,
           9
         ],
-        "description": "Asia/Shanghai quiet period [23,9): sends allowed 09:00 inclusive to 23:00 exclusive"
+        "description": "Asia/Shanghai quiet [start,end). Trial [23,9]; continuous [0,9] permits 09:00:00 through 23:59:59."
+      },
+      "max_generations_per_day": {
+        "type": "int",
+        "default": 0,
+        "description": "Explicit daily model-evaluation budget, including defer/skip/errors. 0 only means inherit the existing trial daily limit; continuous must explicitly set 1..5 (approved: 5)."
       }
     }
   },

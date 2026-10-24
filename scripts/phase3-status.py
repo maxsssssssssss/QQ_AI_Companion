@@ -141,6 +141,7 @@ def configured_flags(data):
         'runtime':{key:boolean(runtime.get(key)) for key in ('enabled','persona','natural_chat','memory','search','proactive','background_web')},
         'guard':{key:boolean(guard.get(key)) for key in ('phase3_enabled','phase3_proactive_enabled')},
         'search_enabled':boolean(search.get('enabled')),
+        'search_scope':search.get('scope','reviewed') if search.get('scope','reviewed') in ('reviewed','general_public') else 'invalid',
         'native_disk':{'memory_summary_enabled':boolean(memory.get('memory_summary',{}).get('enabled')),
                        'proactive_generation_enabled':boolean(nested(private,'proactive_generation_config','enable_llm_proactive_message')),
                        'proactive_max_daily':number(nested(private,'proactive_reach_config','max_daily_messages'),maximum=25)},
@@ -213,16 +214,21 @@ def search_counts(path,now):
 def proactive_status(data,now):
     cfg=read_json(data/'config/phase3_runtime_config.json')
     window=cfg.get('proactive_window',{})
+    mode=window.get('mode','trial')
+    mode=mode if mode in ('trial','continuous') else None
     start,end=window.get('window_start'),window.get('window_end')
+    continuous=mode=='continuous' and number(start)==0 and number(end)==0
     quiet=window.get('quiet_hours',[23,9])
     quiet=quiet if isinstance(quiet,list) and len(quiet)==2 and all(type(v) is int and 0<=v<=23 for v in quiet) else None
-    result={'requested':boolean(cfg.get('proactive')),'timezone':'Asia/Shanghai',
+    result={'requested':boolean(cfg.get('proactive')),'mode':mode,'timezone':'Asia/Shanghai',
         'window_start':iso_time(start),'window_end':iso_time(end),
+        'has_scheduled_expiry':False if continuous else (True if mode=='trial' and iso_time(end) else None),
         'max_per_day':number(window.get('max_per_day'),maximum=5),
+        'max_generations_per_day':number(window.get('max_generations_per_day'),maximum=5),
         'cooldown_seconds':number(window.get('cooldown'),maximum=604800),'quiet_hours':quiet,
         'state_scope':'derived_from_config_and_durable_ledger_not_live_plugin_flags'}
     stamp=now.timestamp();today=now.astimezone(SHANGHAI).date().isoformat()
-    pause=0
+    pause=0;pause_indefinite=False
     path=data/'plugin_data/phase3_runtime/proactive-controls.sqlite3'
     if path.exists():
         with readonly_db(path) as db:
@@ -231,6 +237,8 @@ def proactive_status(data,now):
                 try: pause=float(row[0])
                 except (ValueError,TypeError): pause=0
                 if number(pause,maximum=4102444800) is None: pause=0
+            row=db.execute("SELECT value FROM proactive_controls WHERE name='pause_indefinite'").fetchone()
+            pause_indefinite=bool(row and row[0] in ('1',1))
             result['attempts_today']={state:count(db,'proactive_attempts','day=? AND state=?',(today,state)) for state in (*DELIVERY_STATES,'cancelled')}
             result['generations_today']={state:count(db,'proactive_generations','day=? AND state=?',(today,state)) for state in GENERATION_STATES}
             columns={r[1] for r in db.execute('PRAGMA table_info(proactive_attempts)')}
@@ -239,12 +247,13 @@ def proactive_status(data,now):
                 result['confirmed_bubbles_today']=number(confirmed)
                 result['planned_bubbles_today']=number(planned)
     else: result['ledger']='NOT_INITIALIZED'
-    result.update(paused=pause>stamp,pause_until=iso_time(pause))
+    result.update(paused=pause_indefinite or pause>stamp,pause_until=iso_time(pause),pause_indefinite=pause_indefinite)
     if result['requested'] is not True: state='DISABLED'
-    elif not result['window_start'] or not result['window_end'] or start>=end: state='UNCONFIGURED'
-    elif stamp>=end: state='EXPIRED'
-    elif stamp<start: state='WAITING'
-    elif pause>stamp: state='PAUSED'
+    elif mode is None or (mode=='continuous' and not continuous): state='UNCONFIGURED'
+    elif mode=='trial' and (not result['window_start'] or not result['window_end'] or start>=end): state='UNCONFIGURED'
+    elif mode=='trial' and stamp>=end: state='EXPIRED'
+    elif mode=='trial' and stamp<start: state='WAITING'
+    elif result['paused']: state='PAUSED'
     elif quiet is None: state='INVALID_QUIET_HOURS'
     else:
         hour=now.astimezone(SHANGHAI).hour;a,b=quiet

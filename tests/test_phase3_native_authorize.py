@@ -1,10 +1,13 @@
 """Offline native capability migration: real pinned APIs, synthetic private data."""
 from copy import deepcopy
+from contextlib import redirect_stdout
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -43,7 +46,7 @@ class NativeAuthorizeTests(unittest.TestCase):
 
     def tearDown(self): self.temp.cleanup()
 
-    def candidate(self): return migration.native_candidate(SOURCE,self.store,self.identity,self.output)
+    def candidate(self, **kwargs): return migration.native_candidate(SOURCE,self.store,self.identity,self.output,**kwargs)
 
     def test_real_native_capability_and_atomic_backend_preserve_other_data(self):
         before=self.store.read_bytes()
@@ -51,6 +54,7 @@ class NativeAuthorizeTests(unittest.TestCase):
         saved=json.loads(self.output.read_text());changed=saved['users']['qq:10001:scoped']
         self.assertEqual(self.store.read_bytes(),before)
         self.assertEqual(report['status'],'CANDIDATE_READY')
+        self.assertEqual(report['daily_limit'],2)
         self.assertTrue(report['native_api_called']);self.assertTrue(report['native_atomic_save_used'])
         self.assertTrue(changed['unified_profile_capabilities']['proactive_private_enabled'])
         self.assertEqual(changed['proactive_daily_limit'],2)
@@ -62,6 +66,34 @@ class NativeAuthorizeTests(unittest.TestCase):
         serialized=json.dumps(report)
         for secret in ('10001','20002',SESSION,'SENSITIVE_SYNTHETIC_BODY','DO_NOT_CHANGE'):
             self.assertNotIn(secret,serialized)
+
+    def test_explicit_daily_limits_reach_saved_candidate_and_validation(self):
+        for daily_limit in (1,3,4,5):
+            with self.subTest(daily_limit=daily_limit):
+                report=self.candidate(daily_limit=daily_limit)
+                saved=json.loads(self.output.read_text())
+                self.assertEqual(report['daily_limit'],daily_limit)
+                self.assertEqual(saved['users']['qq:10001:scoped']['proactive_daily_limit'],daily_limit)
+                migration.validate_delta(self.data,saved,'qq:10001:scoped',daily_limit=daily_limit)
+                with self.assertRaisesRegex(migration.MigrationError,'native_update_not_applied'):
+                    migration.validate_delta(self.data,saved,'qq:10001:scoped')
+                self.output.unlink()
+
+    def test_invalid_daily_limits_refuse_before_native_calls_or_backup(self):
+        backup=self.root/'backup'
+        for daily_limit in (0,6,-1,True,False,2.0,'5',None):
+            with self.subTest(daily_limit=daily_limit), \
+                    patch.object(migration,'native_modules') as native, \
+                    patch.object(migration,'stopped_image') as stopped, \
+                    patch.object(migration,'command') as command:
+                with self.assertRaisesRegex(migration.MigrationError,'invalid_daily_limit'):
+                    self.candidate(daily_limit=daily_limit)
+                with self.assertRaisesRegex(migration.MigrationError,'invalid_daily_limit'):
+                    migration.migrate(self.root,backup,approved=True,daily_limit=daily_limit)
+                with self.assertRaisesRegex(migration.MigrationError,'invalid_daily_limit'):
+                    migration.run_worker(IMAGE,SOURCE,self.root,daily_limit=daily_limit)
+                native.assert_not_called();stopped.assert_not_called();command.assert_not_called()
+                self.assertFalse(self.output.exists());self.assertFalse(backup.exists())
 
     def test_second_native_authorization_is_idempotent_without_duplicate_audit(self):
         self.candidate()
@@ -141,6 +173,7 @@ class NativeAuthorizeTests(unittest.TestCase):
         write(self.root/'worker-result.json',{'status':'CANDIDATE_READY'})
         with patch.object(migration,'command',lambda args,**kw:calls.append(args) or b''):
             migration.run_worker(IMAGE,SOURCE,self.root)
+            migration.run_worker(IMAGE,SOURCE,self.root,daily_limit=5)
         command=calls[0]
         self.assertIn('--read-only',command);self.assertIn('--cap-drop',command)
         self.assertEqual(command[command.index('--network')+1],'none')
@@ -148,7 +181,67 @@ class NativeAuthorizeTests(unittest.TestCase):
         self.assertFalse(any('/opt/phase2-runtime' in part for part in command))
         self.assertEqual(command[command.index('--entrypoint')+1],'python')
         self.assertNotIn('main.py',' '.join(command));self.assertNotIn('/AstrBot/data',' '.join(command))
-        self.assertEqual(command[-2:],['/migration.py','--worker'])
+        self.assertEqual(command[-4:],['/migration.py','--worker','--daily-limit','2'])
+        self.assertEqual(calls[1][:-1],command[:-1])
+        self.assertEqual(calls[1][-1],'5')
+
+    def test_cli_passes_explicit_limit_to_preparation_and_worker_and_refuses_six(self):
+        with patch.object(sys,'argv',['migration','--backup-dir',str(self.root/'backup'),
+                '--approved-target-migration','--daily-limit','5']), \
+                patch.object(migration,'migrate',return_value={'status':'PREPARED_NOT_APPLIED'}) as prepare, \
+                redirect_stdout(io.StringIO()):
+            self.assertEqual(migration.main(),0)
+        self.assertEqual(prepare.call_args.kwargs['daily_limit'],5)
+        self.assertFalse(prepare.call_args.kwargs['apply'])
+        with patch.object(sys,'argv',['migration','--worker','--daily-limit','5']), \
+                patch.object(migration,'native_candidate',return_value={'status':'CANDIDATE_READY'}) as candidate, \
+                patch.object(migration,'write_new'), redirect_stdout(io.StringIO()):
+            self.assertEqual(migration.main(),0)
+        self.assertEqual(candidate.call_args.kwargs['daily_limit'],5)
+        result=subprocess.run([sys.executable,str(ROOT/'scripts/phase3-authorize-native.py'),
+            '--daily-limit','6'],capture_output=True,text=True,check=False)
+        self.assertEqual(result.returncode,2)
+        self.assertIn('invalid choice',result.stderr)
+
+    def test_preparation_records_requested_limit_and_rejects_worker_count_mismatch(self):
+        data=self.root/'state/data'
+        live=data/'plugin_data/astrbot_plugin_private_companion/companions.json'
+        identity=data/'config/phase2_policy_config.json'
+        config=data/'config/astrbot_plugin_private_companion_config.json'
+        source=data/'plugins/astrbot_plugin_private_companion'
+        source.mkdir(parents=True)
+        write(live,self.data)
+        write(identity,{'admin_id':'10001','platform_id':'fixture'})
+        write(config,{'storage_backend':'json','max_daily_messages':0,'enable_llm_proactive_message':False})
+        before=live.read_bytes()
+        for daily_limit,reported_limit in ((2,2),(5,5),(5,2)):
+            backup=self.root/f'backup-{daily_limit}-{reported_limit}'
+            def worker(image,unused_source,work,*,daily_limit):
+                self.assertEqual(image,IMAGE)
+                result=migration.native_candidate(SOURCE,work/'companions.before.json',
+                    work/'identity.json',work/'companions.after.json',daily_limit=daily_limit)
+                result['daily_limit']=reported_limit
+                write(work/'worker-result.json',result)
+                return result
+            with self.subTest(daily_limit=daily_limit,reported_limit=reported_limit), \
+                    patch.object(migration,'check_source'), \
+                    patch.object(migration,'stopped_image',return_value=(CONTAINER,IMAGE)), \
+                    patch.object(migration,'run_worker',side_effect=worker):
+                kwargs={} if daily_limit==2 else {'daily_limit':daily_limit}
+                if daily_limit!=reported_limit:
+                    with self.assertRaisesRegex(migration.MigrationError,'invalid_worker_result'):
+                        migration.migrate(self.root,backup,approved=True,**kwargs)
+                    self.assertFalse((backup/'migration-result.json').exists())
+                else:
+                    report=migration.migrate(self.root,backup,approved=True,**kwargs)
+                    self.assertEqual(report['status'],'PREPARED_NOT_APPLIED')
+                    self.assertEqual(report['daily_limit'],daily_limit)
+                    self.assertFalse(report['global_generation_enabled']);self.assertFalse(report['service_started'])
+                    self.assertEqual(json.loads((backup/'migration-result.json').read_text()),report)
+                self.assertEqual(json.loads((backup/'backup-manifest.json').read_text())['daily_limit'],daily_limit)
+                saved=json.loads((backup/'companions.after.json').read_text())
+                self.assertEqual(saved['users']['qq:10001:scoped']['proactive_daily_limit'],daily_limit)
+                self.assertEqual(live.read_bytes(),before)
 
     def test_apply_approval_and_running_container_refuse_before_any_backup(self):
         backup=self.root/'backup'

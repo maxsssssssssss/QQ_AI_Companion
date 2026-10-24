@@ -50,7 +50,7 @@ def validate_policy(config: dict, admin_id: str, platform_id: str, *, require_ke
         require(provider_settings.get("buffer_intermediate_messages") is False, "intermediate_buffer_enabled")
         require(provider_settings.get("display_reasoning_text") is False, "reasoning_display_enabled")
         misc = config.get("agent_runner", {}).get("config", {}).get("misc", {})
-        require(type(misc.get("max_steps")) is int and 1 <= misc["max_steps"] <= 6, "unbounded_agent_steps")
+        require(type(misc.get("max_steps")) is int and 1 <= misc["max_steps"] <= 10, "unbounded_agent_steps")
         require(type(misc.get("tool_call_timeout")) is int and 30 <= misc["tool_call_timeout"] <= 60,
                 "unexpected_tool_timeout")
     for name in ("streaming_response", "show_tool_use_status",
@@ -95,7 +95,7 @@ def validate_policy(config: dict, admin_id: str, platform_id: str, *, require_ke
         extra = model.get("custom_extra_body", {})
         require(extra.get("thinking") == {"type": "disabled"}, "unbounded_thinking")
         limit = extra.get("max_tokens")
-        require(isinstance(limit, int) and 1 <= limit <= 2048, "unbounded_output")
+        require(type(limit) is int and 1 <= limit <= 8192, "unbounded_output")
     if require_key:
         require(source.get("enable") is True and provider_settings.get("enable") is True,
                 "deepseek_not_enabled")

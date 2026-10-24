@@ -49,15 +49,20 @@
     "description": "Use pinned semantic parser and one bounded Guard send loop. Can be disabled independently.",
     "default": true
   },
+  "phase3_casual_split_fallback_enabled": {
+    "type": "bool",
+    "description": "V3.1 optional fallback: at most 100 Unicode codepoints, 2-4 complete sentences; merge short sentences (<6 letters/digits), keep 2-4 exact bubbles. Excludes structured/technical/search replies; existing Guard sender only.",
+    "default": false
+  },
   "phase3_bubble_min_interval": {
     "type": "float",
     "description": "Minimum seconds between later bubbles. First bubble has no added wait.",
-    "default": 0.6
+    "default": 1.0
   },
   "phase3_bubble_max_interval": {
     "type": "float",
     "description": "Maximum seconds between bubbles (validated at most 3).",
-    "default": 1.8
+    "default": 2.0
   },
   "phase3_plain_text_enabled": {
     "type": "bool",

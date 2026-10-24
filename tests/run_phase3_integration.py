@@ -18,6 +18,7 @@ sys.path[:0] = [str(ROOT), str(ROOT / "scripts"), str(ROOT / "tests")]
 from offline_peers import MockLLM, OneBotPeer, action_text
 from prepare_plugins import prepare_plugins
 from integrations.phase3_runtime.settings import private_config
+from integrations.phase1_guard.bubbles import PROMPT, PROMPT_MARKER, MARKER
 from integrations.phase3_memory.bridge import native_config
 from phase3_memory_http_fixture import MemoryMockLLM
 from phase3_memory_http_fixture import current_profile_evidence
@@ -65,6 +66,7 @@ class Suite:
         configs = self.state / "data/config"
         (configs / "phase1_guard_config.json").write_text(json.dumps({"phase3_enabled": True,
             "phase3_plain_text_enabled": True,
+            "phase3_casual_split_fallback_enabled": True,
             "phase3_empty_recovery_enabled": True,
             "phase3_admin_id": "10001", "phase3_platform_id": "offline", "phase3_group_window": 0.25,
             "phase3_group_max_wait": 1.0, "phase3_group_max_messages": 8, "send_timeout_seconds": 1.0}))
@@ -81,7 +83,9 @@ class Suite:
         memory['startup'] = {'background_grace_seconds': 0}
         path.write_text(json.dumps(memory))
         (self.state / "data/phase3").mkdir()
-        shutil.copyfile(ROOT / "persona/phase3-v0.1.md", self.state / "data/phase3/persona-v0.1.md")
+        # The stable destination name is part of the existing runtime contract;
+        # its content is the already approved current V0.2 template.
+        shutil.copyfile(ROOT / "persona/phase3-v0.2.md", self.state / "data/phase3/persona-v0.1.md")
 
     async def start(self):
         (self.state / "startup.json").unlink(missing_ok=True)
@@ -185,6 +189,75 @@ class Suite:
             'guard_history_confirmed_parts':1},ensure_ascii=False,indent=2))
         self.record('I18','Fresh profile body was parsed only from the last user message sole native MemoryCompanion context, with no profile marker in system and sixteen old failed/tool history rows retained; one response, Guard acknowledgement/history, no classifier/tool replay')
 
+    async def verify_v3_fallback(self):
+        """Exercise the unchanged native decoration/Guard/history pipeline."""
+        acknowledged=[]
+        for prefix,kind,expected in [
+            ('隔离V3普通两句','v3_casual_fallback',['今天可算忙完了！','今晚可以安心歇一会儿了']),
+            ('隔离V31普通三句','v31_three_fallback',
+             ['今天真的忙完啦！🎉  ','今晚可以安心歇一会儿了。  ','明天的事就留给明天吧！']),
+            ('隔离V31普通四句','v31_four_fallback',
+             ['今天可算忙完了！','今晚可以安心歇一会儿了。','明天的事就留给明天吧。','这会儿只想陪你随便聊聊'])]:
+            before = len(self.chat_requests())
+            await self.peer.emit(prefix+'：合成闲聊，不是用户事实。')
+            actions = [await asyncio.wait_for(self.peer.outgoing.get(), 40) for _ in expected]
+            await asyncio.sleep(.3)
+            assert self.peer.outgoing.empty()
+            calls = self.chat_requests()[before:]
+            assert len(calls) == 1 and calls[0]['kind'] == kind
+            raw = calls[0]['response']['choices'][0]['message']['content']
+            assert MARKER not in raw and len(raw)<=100
+            assert [action_text(action) for action in actions] == expected
+            # Boundary metadata permits only the known terminal-period
+            # deletion, not restoring it or rewriting any cleaned character.
+            final_cleaned=raw.rstrip('。')
+            assert ''.join(expected) == final_cleaned
+            with sqlite3.connect(self.state/'data/plugin_data/phase1_guard/guard.sqlite3') as db:
+                tid,diag_raw = db.execute('SELECT turn_id,diagnostics_json FROM turns ORDER BY rowid DESC LIMIT 1').fetchone()
+                parts = db.execute('SELECT part_index,state,text FROM deliveries WHERE turn_id=? ORDER BY part_index', (tid,)).fetchall()
+            assert parts == [(i, 'sent', text) for i, text in enumerate(expected)]
+            diag=json.loads(diag_raw)
+            assert diag['model_final']['segment_plan']['raw_exact_marker_count']==0
+            assert diag['cleaned_final']['segment_plan']['source']=='smalltalk_fallback'
+            assert diag['cleaned_final']['confirmed_parts']==len(expected)
+            acknowledged.extend(expected)
+        self.record('I21', 'V3.1 complete two/three/four-sentence candidates passed the full native cleanup into individually acknowledged Guard parts; one HTTP model request each, concatenation exactly matched cleaned text including spacing/Emoji, removed terminal periods were not restored')
+
+        for prefix, kind in [('隔离V3短单句', 'v3_short_single'),
+                             ('隔离V31短句合并', 'v31_short_merged'),
+                             ('隔离V3连续长句', 'v3_continuous_single'),
+                             ('隔离V3技术结构', 'v3_technical_single')]:
+            before = len(self.chat_requests())
+            reply = await self.peer.send(prefix+'：合成格式测试。', timeout=40)
+            await asyncio.sleep(.3)
+            assert self.peer.outgoing.empty(), kind
+            calls = self.chat_requests()[before:]
+            assert len(calls) == 1 and calls[0]['kind'] == kind
+            raw = calls[0]['response']['choices'][0]['message']['content']
+            expected_text = raw.replace('```sql\n','').replace('```\n','').rstrip('。')
+            assert action_text(reply) == expected_text, kind
+            with sqlite3.connect(self.state/'data/plugin_data/phase1_guard/guard.sqlite3') as db:
+                parts = db.execute('SELECT state,text FROM deliveries WHERE turn_id=(SELECT turn_id FROM turns ORDER BY rowid DESC LIMIT 1)').fetchall()
+            assert parts == [('sent', expected_text)]
+        self.record('I22', 'V3.1 short Emoji reply, a below-six-character first sentence merged with its successor, uninterrupted long sentence and SQL explanation each remained one acknowledged bubble after fixed native cleanup; no content truncation')
+
+        deliveries = self.rows('deliveries')
+        await self.stop()
+        await self.start()
+        await asyncio.sleep(.5)
+        assert self.peer.outgoing.empty()
+        assert self.rows('deliveries') == deliveries
+        before = len(self.chat_requests())
+        reply = await self.peer.send('隔离V3重启后继续：之前的合成回复无需重发。', timeout=40)
+        assert action_text(reply) == '还在呢🙂'
+        calls = self.chat_requests()[before:]
+        assert len(calls) == 1 and calls[0]['kind'] == 'v3_restart_single'
+        assistant_history = '\n'.join(str(m.get('content','')) for m in calls[0]['request']['messages']
+                                      if m.get('role') == 'assistant')
+        assert all(text in assistant_history for text in acknowledged)
+        assert MARKER not in assistant_history
+        self.record('I23', 'Process restart preserved the already acknowledged V3 split history and ledger without resending any old part; a new user input still reached the same ordinary Guard path')
+
     async def run(self):
         self.prepare()
         await self.mock.start()
@@ -200,9 +273,9 @@ class Suite:
             assert len(calls) == 1, len(calls)
             payload = json.dumps(calls[0]["request"], ensure_ascii=False)
             assert all(text in payload for text in messages)
-            assert payload.count("[QQ_COMPANION_PERSONA_V0_1]") == 1
+            assert payload.count("[QQ_COMPANION_PERSONA_V0_2]") == 1
             assert all(text in action_text(action) for text in messages)
-            self.record("I02", "Three real WS inputs became one HTTP model call with one V0.1 persona and one reply")
+            self.record("I02", "Three real WS inputs became one HTTP model call with one approved V0.2 persona and one reply")
             await self.peer.ws.send_json(events[0])
             await self.peer.emit("合成未授权消息", user=10002)
             await self.peer.emit("/合成群消息", group=20001)
@@ -219,7 +292,7 @@ class Suite:
             await asyncio.sleep(.5)
             assert "合成重启后继续" in action_text(reply)
             payload = json.dumps(self.chat_requests()[-1]["request"], ensure_ascii=False)
-            assert "[QQ_COMPANION_PERSONA_V0_1]" in payload
+            assert "[QQ_COMPANION_PERSONA_V0_2]" in payload
             assert all(text in payload for text in messages)
             self.record("I05", "New process retained persona, prior context and continued OneBot chat")
             await self.peer.send('我是一名工程师。我住在苏州。我喜欢清茶。明天有面试，还有一份报告没完成。', timeout=40)
@@ -345,9 +418,22 @@ class Suite:
             assert [action_text(item) for item in bubbles] == expected_bubbles
             await asyncio.sleep(.3)
             assert len(self.chat_requests()) == before+1
+            request = self.chat_requests()[-1]['request']
+            actual_system = '\n'.join(m.get('content','') for m in request['messages']
+                                      if m.get('role') == 'system')
+            assert actual_system.count(PROMPT_MARKER) == 1
+            assert PROMPT in actual_system
+            raw = self.chat_requests()[-1]['response']['choices'][0]['message']['content']
+            assert raw.count(MARKER) == 1
             with sqlite3.connect(self.state/'data/plugin_data/phase1_guard/guard.sqlite3') as db:
                 rows=db.execute("SELECT part_index,state,text FROM deliveries WHERE turn_id=(SELECT turn_id FROM turns ORDER BY rowid DESC LIMIT 1) ORDER BY part_index").fetchall()
             assert rows == [(index,'sent',text) for index,text in enumerate(expected_bubbles)]
+            with sqlite3.connect(self.state/'data/plugin_data/phase1_guard/guard.sqlite3') as db:
+                native_parts = json.loads(db.execute('SELECT diagnostics_json FROM turns ORDER BY rowid DESC LIMIT 1').fetchone()[0])
+            assert native_parts['model_final']['segment_plan']['raw_exact_marker_count'] == 1
+            assert native_parts['model_final']['segment_plan']['native_count'] == 2
+            assert native_parts['cleaned_final']['segment_plan']['planned_parts'] == 2
+            assert native_parts['cleaned_final']['confirmed_parts'] == 2
             # The next native request must contain the acknowledged projection,
             # not the private marker nor a premature full-output placeholder.
             await self.peer.send('隔离确认多气泡后的普通上下文。',timeout=40)
@@ -356,6 +442,7 @@ class Suite:
             assert not any('PRIVATE_COMPANION_SPLIT' in str(m.get('content',''))
                            for m in self.chat_requests()[-1]['request']['messages'] if m.get('role')=='assistant')
             self.record('I15','Pinned full decoration chain preserved two semantic bubbles, removed cosmetic Markdown, and projected only acknowledged text into native history; one model request')
+            await self.verify_v3_fallback()
         except Exception as exc:
             self.results.append({"id": "EXECUTION", "status": "FAIL", "error_type": type(exc).__name__})
             self.save()

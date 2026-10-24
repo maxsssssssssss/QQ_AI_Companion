@@ -66,6 +66,16 @@ class StatusTests(unittest.TestCase):
             CREATE TABLE proactive_generations(day TEXT,state TEXT,candidate TEXT);
             INSERT INTO proactive_generations VALUES('2026-10-22','generated','{SECRET}');""")
 
+    def continuous_fixture(self):
+        self.fixtures()
+        config=json.loads((self.data/'config/phase3_runtime_config.json').read_text())
+        config['proactive_window']={'mode':'continuous','window_start':0,'window_end':0,
+            'quiet_hours':[0,9],'max_per_day':5,'max_generations_per_day':5,'cooldown':10800}
+        self.write('config/phase3_runtime_config.json',config)
+        with sqlite3.connect(self.proactive) as db:
+            db.execute("UPDATE proactive_controls SET value='0' WHERE name='pause_until'")
+        return config
+
     def test_full_report_only_aggregates_and_separates_actual_usage_from_limits(self):
         self.fixtures()
         raw={'service':'astrbot','resources':{'memory_bytes':2*1024**3},'status':'running','running':True,'environment':SECRET}
@@ -144,7 +154,80 @@ class StatusTests(unittest.TestCase):
             ('2026-10-25T09:00:00+08:00','EXPIRED')):
             report=status.proactive_status(self.data,datetime.fromisoformat(stamp))
             self.assertEqual(report['window_state'],expected)
+            self.assertEqual(report['mode'],'trial')
+            self.assertTrue(report['has_scheduled_expiry'])
             self.assertNotIn(SECRET,json.dumps(report));self.assertNotIn(IDENTITY,json.dumps(report))
+
+    def test_continuous_has_no_expiry_and_observes_shanghai_day_boundaries(self):
+        self.continuous_fixture()
+        before=self.proactive.read_bytes()
+        for stamp,expected in (('2026-10-22T00:00:00+08:00','QUIET_HOURS'),
+            ('2026-10-22T08:59:59+08:00','QUIET_HOURS'),('2026-10-22T01:00:00+00:00','IN_WINDOW'),
+            ('2026-10-22T23:00:00+08:00','IN_WINDOW'),('2026-10-22T23:59:59+08:00','IN_WINDOW'),
+            ('2026-10-23T00:00:00+08:00','QUIET_HOURS'),('2030-10-22T09:00:00+08:00','IN_WINDOW')):
+            with self.subTest(stamp=stamp):
+                report=status.proactive_status(self.data,datetime.fromisoformat(stamp))
+                self.assertEqual(report['mode'],'continuous')
+                self.assertEqual(report['window_state'],expected)
+                self.assertIsNone(report['window_start']);self.assertIsNone(report['window_end'])
+                self.assertFalse(report['has_scheduled_expiry'])
+                self.assertEqual(report['quiet_hours'],[0,9])
+                self.assertEqual(report['max_per_day'],5)
+                self.assertEqual(report['max_generations_per_day'],5)
+                self.assertEqual(report['cooldown_seconds'],10800)
+                self.assertFalse(report['paused']);self.assertFalse(report['pause_indefinite'])
+                self.assertNotIn(SECRET,json.dumps(report));self.assertNotIn(IDENTITY,json.dumps(report))
+        self.assertEqual(before,self.proactive.read_bytes())
+
+    def test_continuous_indefinite_and_timed_pause_and_disabled_priority(self):
+        config=self.continuous_fixture()
+        until=int(datetime.fromisoformat('2026-10-22T11:00:00+08:00').timestamp())
+        with sqlite3.connect(self.proactive) as db:
+            db.execute("INSERT INTO proactive_controls VALUES('pause_indefinite','1')")
+            db.execute("UPDATE proactive_controls SET value=? WHERE name='pause_until'",(str(until),))
+        report=status.proactive_status(self.data,datetime.fromisoformat('2030-10-22T10:00:00+08:00'))
+        self.assertEqual(report['window_state'],'PAUSED')
+        self.assertTrue(report['paused']);self.assertTrue(report['pause_indefinite'])
+        self.assertEqual(report['pause_until'],'2026-10-22T11:00:00+08:00')
+        config['proactive']=False
+        self.write('config/phase3_runtime_config.json',config)
+        self.assertEqual(status.proactive_status(self.data,self.now)['window_state'],'DISABLED')
+        config['proactive']=True
+        self.write('config/phase3_runtime_config.json',config)
+        with sqlite3.connect(self.proactive) as db:
+            db.execute("UPDATE proactive_controls SET value='0' WHERE name='pause_indefinite'")
+        report=status.proactive_status(self.data,self.now)
+        self.assertEqual(report['window_state'],'PAUSED')
+        self.assertTrue(report['paused']);self.assertFalse(report['pause_indefinite'])
+        report=status.proactive_status(self.data,datetime.fromisoformat('2026-10-22T11:00:00+08:00'))
+        self.assertEqual(report['window_state'],'IN_WINDOW');self.assertFalse(report['paused'])
+
+    def test_indefinite_pause_survives_return_to_trial(self):
+        self.fixtures()
+        with sqlite3.connect(self.proactive) as db:
+            db.execute("INSERT INTO proactive_controls VALUES('pause_indefinite','1')")
+        report=status.proactive_status(self.data,datetime.fromisoformat('2026-10-22T12:00:00+08:00'))
+        self.assertEqual(report['mode'],'trial')
+        self.assertEqual(report['window_state'],'PAUSED');self.assertTrue(report['pause_indefinite'])
+
+    def test_invalid_continuous_config_and_controls_do_not_leak_arbitrary_values(self):
+        config=self.continuous_fixture()
+        original=config['proactive_window'].copy()
+        with sqlite3.connect(self.proactive) as db:
+            db.execute("INSERT INTO proactive_controls VALUES('pause_indefinite',?)",(SECRET,))
+        for change in ({'mode':SECRET},{'mode':IDENTITY},{'window_end':1},{'window_start':False},
+            {'window_start':None},{'window_end':float('nan')}):
+            with self.subTest(change=change):
+                config['proactive_window']={**original,**change}
+                self.write('config/phase3_runtime_config.json',config)
+                report=status.proactive_status(self.data,self.now)
+                self.assertEqual(report['window_state'],'UNCONFIGURED')
+                self.assertFalse(report['paused']);self.assertFalse(report['pause_indefinite'])
+                self.assertNotIn(SECRET,json.dumps(report));self.assertNotIn(IDENTITY,json.dumps(report))
+        config['proactive']=False
+        config['proactive_window']['mode']=SECRET
+        self.write('config/phase3_runtime_config.json',config)
+        self.assertEqual(status.proactive_status(self.data,self.now)['window_state'],'DISABLED')
 
     def test_cpu_and_units_are_actual_measurements_not_limits(self):
         self.assertEqual(status.cpu_percent((1000,400),(1200,450)),75)

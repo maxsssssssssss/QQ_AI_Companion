@@ -1,5 +1,7 @@
 """Synthetic T1 semantic/parser and durable partial-send contracts; no networks."""
 import asyncio
+from dataclasses import FrozenInstanceError, asdict, replace
+import hashlib
 import importlib.util
 from pathlib import Path
 import sqlite3
@@ -7,8 +9,10 @@ import sys
 import tempfile
 import types
 import unittest
+from unittest.mock import patch
 
-from integrations.phase1_guard.bubbles import MARKER, PROMPT, Pacing, semantic_text, send_sequence, plain_qq_text
+from integrations.phase1_guard.bubbles import (MARKER, PROMPT, Pacing, semantic_plan, semantic_text,
+    send_sequence, plain_qq_text, candidate_boundaries, map_candidate_boundaries)
 from integrations.phase1_guard.delivery import DeliveryService, DeliveryReceipt
 from integrations.phase1_guard.store import GuardStore
 
@@ -103,13 +107,301 @@ class SemanticTests(unittest.TestCase):
 
     def test_pacing_validated_and_bounded(self):
         p=Pacing()
-        self.assertGreaterEqual(p.delay('短'),.6);self.assertEqual(p.delay('长'*5000),1.8)
+        self.assertEqual((p.minimum,p.maximum),(1.0,2.0))
+        self.assertGreaterEqual(p.delay('短'),1.0);self.assertEqual(p.delay('长'*5000),2.0)
         for args in [(-1,1),(1,.5),(0,4),(float('nan'),2),(0,float('inf'))]:
             with self.assertRaises(ValueError):Pacing(*args)
 
     def test_prompt_preserves_persona_one_generation_no_forced_question(self):
-        for text in ['V0.1','只发一条','不必结尾追问','不凑数量','最多四个','工具参数不得','所有气泡一次生成']:
+        for text in ['遵循当前已加载的人格设定','简单回应可以只有一条','不意味着每轮都需要追问',
+                     '不要机械拆句、重复内容、凑数量','最多 4 个','工具参数不得','所有气泡仍由同一次模型生成']:
             self.assertIn(text,PROMPT)
+
+
+class SmalltalkFallbackTests(unittest.TestCase):
+    def test_eligible_pair_keeps_original_exactly_and_reports_native_single(self):
+        text='今天可算忙完了！今晚可以安心歇一会儿了。'
+        plan=semantic_plan(parser,text,fallback_enabled=True)
+        self.assertEqual(plan.texts,('今天可算忙完了！','今晚可以安心歇一会儿了。'))
+        self.assertEqual(''.join(plan.texts),text)
+        self.assertEqual((plan.source,plan.native_count,plan.native_controlled),
+                         ('smalltalk_fallback',1,False))
+        self.assertFalse(plan.raw_marker_present)
+        self.assertEqual(plan.raw_exact_marker_count,0)
+        self.assertEqual(plan.diagnostics(),{
+            'source':'smalltalk_fallback','reason':'bounded_complete_sentences',
+            'raw_marker_present':False,'raw_exact_marker_count':0,
+            'native_count':1,'native_controlled':False,'planned_count':2})
+        self.assertNotIn('texts',plan.diagnostics())
+
+    def test_model_markers_have_priority_even_if_heuristic_context_excluded(self):
+        text='甲\n'+MARKER+'\n乙\n'+MARKER+'\n丙'
+        plan=semantic_plan(parser,text,fallback_enabled=True,allow_fallback=False)
+        self.assertEqual(plan.texts,('甲','乙','丙'))
+        self.assertEqual((plan.source,plan.native_count,plan.raw_exact_marker_count),
+                         ('model_markers',3,2))
+        self.assertTrue(plan.native_controlled)
+
+    def test_fallback_can_be_disabled_without_changing_native_protocol(self):
+        text='哈哈，终于收工了！今晚可以好好休息啦。'
+        for kwargs in ({},{'fallback_enabled':False},
+                       {'fallback_enabled':True,'enabled':False},
+                       {'fallback_enabled':True,'allow_fallback':False}):
+            with self.subTest(kwargs=kwargs):self.assertEqual(semantic_text(parser,text,**kwargs),[text])
+
+    def test_short_and_continuous_long_sentence_stay_single(self):
+        for text in ('好呀。','嗯，收到啦 🙂','哈哈，今晚吃点好吃的，吃完就放松一下，想躺就躺着。',
+                     '哈哈，'+('我慢慢听你说，'*35)+'说完就歇一会儿吧。'):
+            with self.subTest(text=text[:12]):
+                self.assertEqual(semantic_text(parser,text,fallback_enabled=True),[text])
+
+    def test_no_split_at_comma_newline_or_fixed_length(self):
+        for text in ('哈哈，终于好了，今晚可以歇歇啦','今天终于忙完啦\n今晚可以安心歇一会儿了。',
+                     '终于'+('很开心'*90)+'！今天可以轻松一点了。'):
+            with self.subTest(text=text[:12]):
+                self.assertEqual(semantic_text(parser,text,fallback_enabled=True),[text])
+
+    def test_technical_code_table_link_quote_and_list_are_single(self):
+        texts=[
+            '今天可算忙完啦！数据库事务必须保持原子性。',
+            '今天可算忙完啦！首先介绍原理，再解释步骤。',
+            '今天可算忙完啦！`print("hello")` 会输出文本。',
+            '今天可算忙完啦！\n```sql\nSELECT 1;\n```',
+            '今天可算忙完啦！| 字段 | 值 |',
+            '今天可算忙完啦！官网在 https://example.org/a。',
+            '今天可算忙完啦！官网 example.org 可以打开。',
+            '今天可算忙完啦！他说“这句话不要拆开”。',
+            "今天可算忙完啦！他说'这句话不要拆开'。",
+            '今天可算忙完啦！> 这是引用正文。',
+            '今天可算忙完啦！1. 确认输入 2. 保存结果。',
+            '今天可算忙完啦！- 第一件事 - 第二件事。',
+            '今天可算忙完啦！① 确认输入 ② 保存结果。',
+            '今天真的**特别开心**！今晚可以安心歇一会儿了。',
+            '今天真的__特别开心__！今晚可以安心歇一会儿了。',
+        ]
+        for text in texts:
+            with self.subTest(text=text):
+                self.assertEqual(semantic_text(parser,text,fallback_enabled=True),[text])
+
+    def test_whitespace_emoji_and_bilingual_content_not_deleted_or_duplicated(self):
+        text='  哈哈，nice！🎉  今晚可以 chill 一下。  '
+        plan=semantic_plan(parser,text,fallback_enabled=True)
+        self.assertEqual(plan.texts,('  哈哈，nice！🎉  ','今晚可以 chill 一下。  '))
+        self.assertEqual(''.join(plan.texts),text)
+
+    def test_marker_mentions_and_damaged_markers_never_enter_heuristic(self):
+        for token in (MARKER,'<<PRIVATE_COMPANION_SPLIT>',
+                      '&lt;&lt;PRIVATE_COMPANION_SPLIT&gt;&gt;','{{split_marker}}'):
+            text='哈哈，忙完啦！'+token+'今晚可以歇一下。'
+            with self.subTest(token=token):
+                plan=semantic_plan(parser,text,fallback_enabled=True)
+                self.assertEqual(len(plan.texts),1)
+                self.assertTrue(plan.raw_marker_present)
+                self.assertNotIn('PRIVATE_COMPANION_SPLIT',plan.texts[0])
+                self.assertNotEqual(plan.source,'smalltalk_fallback')
+                self.assertIn('哈哈，忙完啦！',plan.texts[0])
+                self.assertIn('今晚可以歇一下。',plan.texts[0])
+
+    def test_parser_or_heuristic_exception_preserves_one_readable_original(self):
+        text='  终于忙完啦！今晚可以安心歇一会儿了。  '
+        self.assertEqual(semantic_text(None,text,fallback_enabled=True),[text])
+        with patch('integrations.phase1_guard.bubbles._smalltalk_parts',side_effect=ValueError('synthetic')):
+            plan=semantic_plan(parser,text,fallback_enabled=True)
+        self.assertEqual(plan.texts,(text,))
+        self.assertEqual(plan.reason,'parser_or_fallback_error')
+
+    def test_two_three_four_complete_sentences_without_opening_cue(self):
+        sentences=['今天终于忙完啦！','今晚可以歇一会儿啦。','明天再慢慢继续就好。',
+                   '现在想聊点开心的呀？','也能一起看看窗外呀。']
+        for count in (2,3,4):
+            with self.subTest(count=count):
+                text=''.join(sentences[:count])
+                self.assertEqual(semantic_text(parser,text,fallback_enabled=True),sentences[:count])
+        text=''.join(sentences)
+        self.assertEqual(semantic_text(parser,text,fallback_enabled=True),[text])
+
+    def test_search_context_remains_excluded(self):
+        progress='好呀！我去看看官方说明。'
+        self.assertEqual(semantic_text(parser,progress,fallback_enabled=True,allow_fallback=False),[progress])
+        final='好呀！这是我查到的资料。'
+        self.assertEqual(semantic_text(parser,final,fallback_enabled=True,allow_fallback=False),[final])
+
+    def test_limit_is_100_unicode_codepoints_including_spaces_and_emoji(self):
+        first='甲'*46+'🙂  。';second='乙'*49+'。'
+        text=first+second
+        self.assertEqual(len(text),100)
+        self.assertEqual(semantic_text(parser,text,fallback_enabled=True),[first,second])
+        text=first+second[:-1]+'🙂。'
+        self.assertEqual(len(text),101)
+        self.assertEqual(semantic_text(parser,text,fallback_enabled=True),[text])
+
+    def test_short_sentence_merges_forward_and_last_short_merges_backward(self):
+        first='今天终于忙完啦！';last='今晚可以歇一会儿啦。'
+        cases=[(['好耶！',first,last],['好耶！'+first,last]),
+               ([first,'嗯。',last],[first,'嗯。'+last]),
+               ([first,last,'好呀。'],[first,last+'好呀。']),
+               (['好耶！','太开心了！',last],['好耶！太开心了！',last]),
+               (['今天好了！','明天继续！','今晚歇歇！','慢慢来呀！'],
+                ['今天好了！明天继续！','今晚歇歇！慢慢来呀！'])]
+        for original,expected in cases:
+            text=''.join(original)
+            with self.subTest(text=text):
+                actual=semantic_text(parser,text,fallback_enabled=True)
+                self.assertEqual(actual,expected)
+                self.assertEqual(''.join(actual),text)
+
+    def test_short_merges_with_only_one_result_keep_original_single(self):
+        for text in ('终于忙完啦！今晚可以安心歇一会儿了。','好呀！行呀！嗯嗯！晚安！',
+                     '好耶！开心！今晚可以歇一会儿了。'):
+            with self.subTest(text=text):
+                self.assertEqual(semantic_text(parser,text,fallback_enabled=True),[text])
+
+    def test_effective_length_counts_letters_numbers_not_punctuation_or_emoji(self):
+        last='今晚可以歇一会儿啦。'
+        for first in ('今天可以歇啦！','I feel good！','今天 123 呀！'):
+            with self.subTest(first=first):
+                self.assertEqual(semantic_text(parser,first+last,fallback_enabled=True),[first,last])
+        for short in ('终于忙完啦！！！🥳','五个字数啊1️⃣！','五个字数啊👩🏽‍💻！'):
+            with self.subTest(short=short):
+                self.assertEqual(semantic_text(parser,short+last,fallback_enabled=True),[short+last])
+
+    def test_unfinished_tail_or_ascii_period_not_a_complete_sentence(self):
+        for text in ('今天可算忙完了！今晚可以歇一会儿啦',
+                     '今天可算忙完了！今晚可以歇一会儿啦🙂  ',
+                     'Today was lovely. Tomorrow will be lovely too.'):
+            with self.subTest(text=text):
+                self.assertEqual(semantic_text(parser,text,fallback_enabled=True),[text])
+
+    def test_punctuation_runs_and_emoji_clusters_preserve_every_character(self):
+        first='  今天👩🏽‍💻忙完好开心！？!!🎉🇨🇳  \r\n'
+        second='今晚可以 chill 一下。❤️1️⃣  '
+        text=first+second
+        plan=semantic_plan(parser,text,fallback_enabled=True)
+        self.assertEqual(plan.texts,(first,second))
+        self.assertEqual(''.join(plan.texts),text)
+        self.assertLessEqual(len(text),100)
+
+    def test_single_fallback_and_disabled_preserve_crlf_and_outer_spaces(self):
+        text='  今天终于忙完啦\r\n可以轻松一点啦。  '
+        for kwargs in ({'fallback_enabled':True},{'fallback_enabled':False},
+                       {'fallback_enabled':True,'allow_fallback':False},
+                       {'fallback_enabled':True,'enabled':False}):
+            with self.subTest(kwargs=kwargs):
+                self.assertEqual(semantic_text(parser,text,**kwargs),[text])
+
+    def test_proactive_text_uses_same_plan_without_a_second_protocol(self):
+        text='嗨，今天忙完啦？想听听你今天过得怎么样。'
+        self.assertEqual(semantic_text(parser,text,fallback_enabled=True),
+                         ['嗨，今天忙完啦？','想听听你今天过得怎么样。'])
+
+
+class CandidateBoundaryTests(unittest.TestCase):
+    sentences=('今天可算忙完了！','今晚可以安心歇一会儿了。',
+               '明天再慢慢继续就好。','现在想聊点开心的呀。')
+
+    def test_exact_and_terminal_period_mapping_for_two_three_four_bubbles(self):
+        for count in (2,3,4):
+            parts=self.sentences[:count];raw=''.join(parts)
+            with self.subTest(count=count):
+                candidate=candidate_boundaries(raw)
+                self.assertIsNotNone(candidate)
+                self.assertEqual(map_candidate_boundaries(candidate,raw),parts)
+                final=raw[:-1]
+                mapped=map_candidate_boundaries(candidate,final)
+                self.assertEqual(mapped,parts[:-1]+(parts[-1][:-1],))
+                self.assertEqual(''.join(mapped),final)
+                self.assertEqual(candidate.raw_end_offsets[-1],len(raw))
+                self.assertEqual(candidate.terminal_period_removed_end_offsets[-1],len(final))
+                self.assertEqual(candidate.raw_end_offsets[:-1],candidate.terminal_period_removed_end_offsets[:-1])
+
+    def test_terminal_period_run_removal_keeps_spaces_crlf_and_emoji_unchanged(self):
+        first='  今天可算忙完了！🎉  \r\n'
+        last='今晚可以安心歇一会儿了。。。 \t\r\n'
+        raw=first+last;candidate=candidate_boundaries(raw)
+        final=first+'今晚可以安心歇一会儿了 \t\r\n'
+        self.assertEqual(map_candidate_boundaries(candidate,raw),(first,last))
+        parts=map_candidate_boundaries(candidate,final)
+        self.assertEqual(parts,(first,'今晚可以安心歇一会儿了 \t\r\n'))
+        self.assertEqual(''.join(parts),final)
+        # Partial removal is not the known native transformation.
+        self.assertIsNone(map_candidate_boundaries(candidate,raw.replace('。。。','。。')))
+
+    def test_optional_variant_is_only_known_terminal_chinese_period_subset(self):
+        for suffix in ('！','？','。❤️','。🎉  '):
+            raw=self.sentences[0]+self.sentences[1][:-1]+suffix
+            with self.subTest(suffix=suffix):
+                candidate=candidate_boundaries(raw)
+                self.assertIsNotNone(candidate)
+                self.assertIsNone(candidate.terminal_period_removed_sha256)
+                self.assertIsNone(candidate.terminal_period_removed_length)
+                self.assertIsNone(candidate.terminal_period_removed_end_offsets)
+                self.assertEqual(''.join(map_candidate_boundaries(candidate,raw)),raw)
+                self.assertIsNone(map_candidate_boundaries(candidate,raw[:-1]))
+
+    def test_any_other_body_change_or_empty_final_fails_closed(self):
+        raw='  '+self.sentences[0]+'\r\n'+self.sentences[1]+'  '
+        candidate=candidate_boundaries(raw)
+        variants=(raw.strip(),raw.replace('\r\n','\n'),raw.replace('！','？',1),
+                  raw.replace('可以','能够',1),raw+'！','',None)
+        for final in variants:
+            with self.subTest(final_type=type(final).__name__,final=final):
+                self.assertIsNone(map_candidate_boundaries(candidate,final))
+        # Removing an internal full stop cannot be confused with terminal cleanup.
+        raw=''.join(self.sentences[:3]);candidate=candidate_boundaries(raw)
+        self.assertIsNone(map_candidate_boundaries(candidate,raw.replace('。','',1)))
+
+    def test_candidate_contains_only_immutable_hash_length_and_offset_metadata(self):
+        raw=''.join(self.sentences[:2]);candidate=candidate_boundaries(raw)
+        values=asdict(candidate)
+        self.assertEqual(set(values),{'raw_sha256','raw_length','raw_end_offsets',
+            'terminal_period_removed_sha256','terminal_period_removed_length',
+            'terminal_period_removed_end_offsets'})
+        self.assertEqual(candidate.raw_sha256,hashlib.sha256(raw.encode()).hexdigest())
+        for value in values.values():
+            if isinstance(value,str):self.assertRegex(value,r'^[0-9a-f]{64}$')
+            elif isinstance(value,tuple):self.assertTrue(all(type(offset) is int for offset in value))
+            else:self.assertTrue(type(value) is int or value is None)
+        self.assertNotIn(raw,repr(candidate))
+        self.assertFalse(hasattr(candidate,'__dict__'))
+        with self.assertRaises(FrozenInstanceError):candidate.raw_length=0
+
+    def test_mapping_does_not_rerun_eligibility_on_final_body(self):
+        raw=''.join(self.sentences[:2]);candidate=candidate_boundaries(raw)
+        with patch('integrations.phase1_guard.bubbles._smalltalk_parts',side_effect=AssertionError('must not rerun')):
+            self.assertEqual(map_candidate_boundaries(candidate,raw),self.sentences[:2])
+            final=raw[:-1]
+            self.assertEqual(''.join(map_candidate_boundaries(candidate,final)),final)
+
+    def test_marker_ineligible_or_formatting_cleaned_body_cannot_gain_a_candidate(self):
+        marked='\n'+MARKER+'\n'
+        for raw in (marked.join(self.sentences[:2]),self.sentences[0],
+                    ''.join(self.sentences[:2])[:-1],'甲'*101,
+                    '今天真的**特别开心**！今晚可以安心歇一会儿了。',
+                    '今天真的__特别开心__！今晚可以安心歇一会儿了。'):
+            with self.subTest(raw=raw):
+                candidate=candidate_boundaries(raw)
+                self.assertIsNone(candidate)
+                self.assertIsNone(map_candidate_boundaries(candidate,plain_qq_text(raw)))
+
+    def test_corrupt_metadata_and_helper_exceptions_return_no_mapping(self):
+        raw=''.join(self.sentences[:2]);candidate=candidate_boundaries(raw)
+        corrupt=(None,{},types.SimpleNamespace(**asdict(candidate)),
+                 replace(candidate,raw_sha256='0'*64),
+                 replace(candidate,raw_length=len(raw)+1),
+                 replace(candidate,raw_end_offsets=(0,len(raw))),
+                 replace(candidate,raw_end_offsets=(len(raw),)),
+                 replace(candidate,raw_end_offsets=(len(raw),len(raw))),
+                 replace(candidate,raw_end_offsets=(True,len(raw))),
+                 replace(candidate,raw_end_offsets=[len(self.sentences[0]),len(raw)]),
+                 replace(candidate,terminal_period_removed_length=None),
+                 replace(candidate,terminal_period_removed_sha256='not-a-digest'),
+                 replace(candidate,terminal_period_removed_end_offsets=(1,len(raw)-1)))
+        for value in corrupt:
+            with self.subTest(value=value):
+                self.assertIsNone(map_candidate_boundaries(value,raw))
+        with patch('integrations.phase1_guard.bubbles._smalltalk_parts',side_effect=ValueError('synthetic')):
+            self.assertIsNone(candidate_boundaries(raw))
+        self.assertIsNone(candidate_boundaries(None))
 
 
 class BubbleLedgerTests(unittest.IsolatedAsyncioTestCase):
@@ -151,7 +443,7 @@ class BubbleLedgerTests(unittest.IsolatedAsyncioTestCase):
         out=await self.send()
         self.assertEqual(out['state'],'sent');self.assertEqual(out['sent_count'],3)
         self.assertEqual(self.calls[0],(0,0))
-        for a,b in zip(self.calls,self.calls[1:]):self.assertTrue(.6<=b[1]-a[1]<=1.8)
+        for a,b in zip(self.calls,self.calls[1:]):self.assertTrue(1.0<=b[1]-a[1]<=2.0)
         self.assertEqual([r['transport_attempts'] for r in out['parts']],[1,1,1])
         self.assertTrue(all(r['finished_at'] for r in out['parts']))
         self.assertEqual(len({r['delivery_id'] for r in out['parts']}),3)

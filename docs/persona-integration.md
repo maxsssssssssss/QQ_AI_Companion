@@ -1,12 +1,18 @@
 # 单一人格接入与真实模型验证
 
-唯一人格 ID 保持 `qq_companion`，核心模板为 `persona/phase3-v0.1.md`。称呼以私有运行配置绑定，自己的姓名、年龄、职业未设。按已确认 V0.1 的女性 AI、安静温和但有独立意见、约六成亲密朋友四成恋人式氛围执行；比例不是随机开关或关系评分。
+唯一人格 ID 保持 `qq_companion`。2026-10-24 按用户提供原文替换为 V0.2，当前核心模板为 `persona/phase3-v0.2.md`；三处称呼由同一私有运行配置绑定，渲染后与批准原文逐字一致。V0.1 文件及其验收证据保留为历史，旧性格比例不再是当前核心提示词。
 
-`phase2_policy` 检测显式开启的 `phase3_runtime` 后，从 V0.1 模板建立或更新同一个原生 PersonaManager 记录。核心标记只出现一次；关闭 search 不改核心，完整关闭 Phase 3 恢复原 Phase 2 模板。原生 SQLite 重开、policy 重跑、缺 Key 与初始化失败的清理均有测试。`phase3_core_persona` 在私人记忆注入前保存，仅这段核心允许给过渡短句生成器，避免把访谈/历史发送给搜索组件。
+`phase2_policy` 检测显式开启的 `phase3_runtime` 后，从部署模板建立或更新同一个原生 PersonaManager 记录。为兼容已锁定加载器和安装器，生产文件槽仍为 `data/phase3/persona-v0.1.md`，实际版本由正文中的 `[QQ_COMPANION_PERSONA_V0_2]` 标记决定；新 staging 默认写入 V0.2。渲染器同时支持历史 V0.1，拒绝混合、重复、未知标记及错误称呼占位数量。关闭 search 不改核心，完整关闭 Phase 3 恢复原 Phase 2 模板。`phase3_core_persona` 在私人记忆注入前保存，仅这段核心允许给过渡短句生成器，避免把访谈/历史发送给搜索组件。
 
 人格定义与工具执行区分：语义分气泡、内部记忆工具和公开搜索说明是同一 Agent 的运行约束，不能再塞第二套人设。字数不做固定切片；常规单条，必要时由语义标记决定 2–4 条，真实受控发送与 ledger 分开取证。
 
-## T3：真实 DeepSeek 合成场景
+## V0.2 替换与生效核验
+
+发布 `phase3-20261024-persona-v02-r1` 仅替换人格模板和渲染器两个文件。AstrBot 停写后完成16个SQLite的备份及隔离恢复，再恢复同一容器；NapCat实例未重启。策略PASS，原生 `qq_companion` 中的正文与批准原文一致，记录ID、工具、skills和begin_dialogs保持；其他源码和配置哈希未变。没有清空会话、重导记忆、发送验收消息或新增模型调用。组件检查22通过/1因缺固定宿主跳过，staging检查5通过；这些只证明替换链路，不作为V0.2真实语言体验评价。
+
+私有回执位于 `evidence/phase3/persona-v02-20261024/`，不随Git发布。服务器旧文件与journal保存在 `releases/phase3-20261024-persona-v02-r1/original/`；若需回退，停AstrBot后按journal原哈希/权限恢复这两个文件，再启动由原生策略更新同一人格。不要恢复整个数据库或data目录，保留期间新增聊天。原始V0.1测试脚本及以下模型结果仍指向旧模板，不代表V0.2已复测。
+
+## V0.1 历史 T3：真实 DeepSeek 合成场景
 
 2026-10-21 使用已有受保护凭据，在 VPS 内存中通过 Phase 2 已有的有界传输调用官方 `deepseek-flash`。Key 没有回传、没有写入命令或报告，服务器未新增文件/修改配置，QQ 没有收发本测试。20 个场景仅取自 `config/phase3-persona-scenarios.json`，不含真实访谈或私聊。
 

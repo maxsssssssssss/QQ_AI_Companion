@@ -8,12 +8,14 @@
   "background_web": false,
   "preferred_address": "你",
   "proactive_window": {
+    "mode": "continuous",
     "window_start": 0,
     "window_end": 0,
-    "max_per_day": 2,
-    "cooldown": 14400,
+    "max_per_day": 5,
+    "max_generations_per_day": 5,
+    "cooldown": 10800,
     "quiet_hours": [
-      23,
+      0,
       9
     ]
   }

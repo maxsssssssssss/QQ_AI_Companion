@@ -91,10 +91,12 @@ def parse_proactive_controls(text, *, now, window_end):
         return actions
     stop = r"(?:(?:先)?(?:不要|别|不用|不必)(?:再|总是|经常)?|停止|暂停)(?:主动(?:找我|联系我?|聊天|发消息)?|找我|打扰我|联系我)"
     if not re.search(r"(?:不要|别)(?:停止|暂停)",text) and re.search(stop, text):
-        until = window_end
+        until = window_end or None
         if re.search(r"今天|今晚", text):
             local = datetime.fromtimestamp(now, ZoneInfo("Asia/Shanghai"))
-            until = min(window_end, (local + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0).timestamp())
+            until = (local + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
+            if window_end > 0:
+                until = min(window_end, until)
         actions.append({"kind": "pause", "until": until})
     if re.search(r"(?:这件事|这个话题|这事).{0,6}(?:不想|不要|别|不用).{0,5}(?:再聊|再提|说了|聊了)", text):
         actions.append({"kind": "block_last_topic"})
@@ -103,11 +105,11 @@ def parse_proactive_controls(text, *, now, window_end):
     elif re.search(r'(?:我(?:现在|这会儿)?(?:正在忙|在忙|不方便聊(?:天)?|不方便回复)|我现在忙|我(?:正在|在)开会)(?:[，。！？\s]|$)',text):
         # A short-lived control, never a permanent profile/preference. A later
         # explicit pause remains separate and is not cleared by "I'm free".
-        actions.append({'kind':'busy','until':min(window_end,now+14400)})
+        actions.append({'kind':'busy','until':min(window_end,now+14400) if window_end > 0 else now+14400})
     return actions
 
 
-def native_proactive_config(original, admin_id, enabled=False):
+def native_proactive_config(original, admin_id, enabled=False, *, policy=None):
     """Stage the pinned 6.7.0 text-only configuration, never mutate live data.
 
     Disk settings stay disabled even when activation was requested. Runtime may
@@ -118,15 +120,18 @@ def native_proactive_config(original, admin_id, enabled=False):
     """
     if not str(admin_id).isdigit() or type(enabled) is not bool:
         raise ValueError("invalid_proactive_identity_or_switch")
+    mode = (policy or {}).get('mode', 'trial')
+    if mode not in {'trial', 'continuous'}:
+        raise ValueError('invalid_proactive_mode')
     result = deepcopy(original)
     groups = {
         "basic_config": {"target_user_ids": [str(admin_id)], "target_platform": "aiocqhttp",
             "enable_auto_user_profile_creation": False, "default_proactive_enabled": False,
             "default_proactive_daily_limit": 0, "enable_worldview_perception": False,
-            "quiet_hours": "23:00-09:00"},
+            "quiet_hours": "00:00-09:00" if mode == 'continuous' else "23:00-09:00"},
         "proactive_reach_config": {"proactive_intensity_preset": "off", "max_daily_messages": 0},
         "private_followup_config": {"enable_group_conversation_followup": False,
-            "min_interval_minutes": 240, "enable_proactive_burst": False,
+            "min_interval_minutes": 180 if mode == 'continuous' else 240, "enable_proactive_burst": False,
             "proactive_unanswered_pause_after": 0},
         "proactive_generation_config": {"enable_llm_proactive_message": False,
             "enable_llm_proactive_persona_judge": False},
@@ -170,7 +175,7 @@ def authorize_native_target(private, session, *, approved=False, daily_limit=2):
     private-chat UMO. Caller must back up the native store before this operation.
     This is not invoked merely because a configuration file enables the bridge.
     """
-    if approved is not True or type(daily_limit) is not int or not 1 <= daily_limit <= 2:
+    if approved is not True or type(daily_limit) is not int or not 1 <= daily_limit <= 5:
         raise PermissionError("explicit_target_migration_approval_required")
     parts = str(session).split(":")
     if len(parts) != 3 or parts[1] != "FriendMessage" or not parts[2].isdigit():
@@ -188,18 +193,28 @@ def authorize_native_target(private, session, *, approved=False, daily_limit=2):
 class ProactiveGate:
     def __init__(self, path, *, allowed_session, enabled=False, window_start=0,
                  window_end=0, max_per_day=2, cooldown=14400,
-                 quiet_hours=(23, 9), clock=time.time):
+                 quiet_hours=(23, 9), mode='trial', max_generations_per_day=None, clock=time.time):
         for value in (window_start, window_end, cooldown):
             if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
                 raise ValueError("invalid_proactive_limit")
         if type(max_per_day) is not int or not 1 <= max_per_day <= 5 or cooldown < 60:
             raise ValueError("invalid_proactive_limit")
-        if enabled and not 0 < window_start < window_end or window_end - window_start > 7 * 86400:
+        if max_generations_per_day is None:
+            max_generations_per_day = max_per_day
+        if type(max_generations_per_day) is not int or not 1 <= max_generations_per_day <= 5:
+            raise ValueError('invalid_proactive_generation_limit')
+        if mode not in {'trial', 'continuous'}:
+            raise ValueError('invalid_proactive_mode')
+        if mode == 'continuous' and (window_start != 0 or window_end != 0):
+            raise ValueError('continuous_requires_unbounded_window')
+        if mode == 'trial' and ((enabled and not 0 < window_start < window_end)
+                                or window_end - window_start > 7 * 86400):
             raise ValueError("invalid_approval_window")
         if len(quiet_hours) != 2 or any(type(n) is not int or not 0 <= n <= 23 for n in quiet_hours):
             raise ValueError("invalid_quiet_hours")
         self.session, self.enabled, self.clock = allowed_session, enabled, clock
         self.start, self.end, self.limit, self.cooldown, self.quiet = window_start, window_end, max_per_day, cooldown, quiet_hours
+        self.mode, self.generation_limit = mode, max_generations_per_day
         self.db = sqlite3.connect(path)
         self.db.execute("CREATE TABLE IF NOT EXISTS proactive_attempts(candidate TEXT PRIMARY KEY, day TEXT, attempted REAL, state TEXT)")
         self.db.execute("CREATE TABLE IF NOT EXISTS proactive_controls(name TEXT PRIMARY KEY, value TEXT)")
@@ -227,7 +242,51 @@ class ProactiveGate:
         self.db.commit()
 
     def pause(self, until=None):
-        self.set_control("pause_until", until if until is not None else self.end)
+        if until is None and self.mode == 'continuous':
+            self.set_control('pause_indefinite', '1')
+            return
+        until = self.end if until is None else until
+        if isinstance(until, bool) or not isinstance(until, (int, float)) or not math.isfinite(until) or until < 0:
+            raise ValueError('invalid_pause_deadline')
+        if until == 0:
+            self.set_control('pause_indefinite', '0')
+        self.set_control("pause_until", until)
+
+    def approved_window_valid(self):
+        if self.mode == 'continuous':
+            return self.start == self.end == 0
+        return 0 < self.start < self.end and self.end - self.start <= 7 * 86400
+
+    def window_open(self, now=None):
+        now = self.clock() if now is None else now
+        return self.approved_window_valid() and (self.mode == 'continuous' or self.start <= now < self.end)
+
+    def expired(self, now=None):
+        now = self.clock() if now is None else now
+        return self.mode == 'trial' and now >= self.end
+
+    def candidate_expiry(self, deadline, *other_deadlines):
+        """A permanent permission never gives a candidate a permanent lifetime."""
+        deadline = deadline or (self.end if self.mode == 'trial' else 0)
+        try:
+            expiry = float(deadline)
+            if not math.isfinite(expiry) or expiry <= 0:
+                return 0
+            limits = other_deadlines + ((self.end,) if self.mode == 'trial' else ())
+            for limit in limits:
+                if limit is None:
+                    continue
+                limit = float(limit)
+                if not math.isfinite(limit) or limit <= 0:
+                    return 0
+                expiry = min(expiry, limit)
+            return expiry
+        except (TypeError, ValueError):
+            return 0
+
+    def _paused(self, now):
+        return (self._get('pause_indefinite') == '1'
+                or now < max(float(self._get('pause_until', '0')), float(self._get('busy_until', '0'))))
 
     def block_topic(self, topic_id):
         self.set_control("blocked:" + topic_id, "1")
@@ -237,9 +296,9 @@ class ProactiveGate:
         now = self.clock()
         if not self.enabled or session != self.session:
             return "not_authorized"
-        if not self.start <= now < self.end:
+        if not self.window_open(now):
             return "outside_approved_window"
-        if busy or now < max(float(self._get("pause_until", "0")),float(self._get('busy_until','0'))):
+        if busy or self._paused(now):
             return "paused_or_busy"
         if event_state in {"completed", "answered", "responded", "cancelled", "do_not_discuss", "expired", "not_yet"}:
             return "event_not_due"
@@ -319,7 +378,7 @@ class ProactiveGate:
             now = self.clock()
             day = datetime.fromtimestamp(now, ZoneInfo("Asia/Shanghai")).date().isoformat()
             count = self.db.execute("SELECT count(*) FROM proactive_generations WHERE day=?", (day,)).fetchone()[0]
-            if count >= self.limit:
+            if count >= self.generation_limit:
                 return "generation_budget"
             self.db.execute("INSERT INTO proactive_generations VALUES (?,?,?,'running')", (evaluation_id, day, now))
             self.db.commit()
@@ -337,9 +396,8 @@ class ProactiveGate:
         hour = datetime.fromtimestamp(now, ZoneInfo("Asia/Shanghai")).hour
         a, b = self.quiet
         quiet = (a < b and a <= hour < b) or (a > b and (hour >= a or hour < b))
-        return (self.enabled and session == self.session and self.start <= now < self.end
-                and not quiet and not busy and now >= float(self._get("pause_until", "0"))
-                and now >= float(self._get('busy_until','0'))
+        return (self.enabled and session == self.session and self.window_open(now)
+                and not quiet and not busy and not self._paused(now)
                 and not (topic_id and self._get("blocked:" + topic_id)))
 
     def close(self):
@@ -357,6 +415,10 @@ class NativeProactiveBridge:
                   "random": "want_to_chat", "impulse": "want_to_chat", "proactive": "want_to_chat",
                   "interest": "own_opinion", "own_opinion": "own_opinion", "news": "public_discovery",
                   "public_discovery": "public_discovery"}
+    CONTINUOUS_REASONS = frozenset({'followup', 'pending_followup', 'open_loop_followup',
+        'activity_followup', 'conversation', 'story', 'random', 'impulse', 'proactive',
+        'interest', 'own_opinion', 'want_to_chat', 'memory_echo', 'mood_checkin',
+        'absence_miss', 'state_share', 'quiet_care', 'check_in'})
 
     def __init__(self, private, guard, gate, outcome_type, *, event_resolver=None, event_source=None,
                  event_delivered=None, generation_timeout=60):
@@ -374,6 +436,7 @@ class NativeProactiveBridge:
         self._decisions = {}
         self._semantic_scope = ContextVar('phase3_proactive_semantic_scope',default=False)
         self._native_settings_active = False
+        self._native_settings_before = {}
         self.metrics = {"generation_attempts": 0, "generation_blocked": 0, "generation_errors": 0,
                         "generation_seconds": 0.0, "delivery_blocked": 0, "delivered": 0}
 
@@ -398,6 +461,7 @@ class NativeProactiveBridge:
                                ("_execute_proactive_action", self.execute_action),
                                ("_generate_proactive_message_direct_fallback", self.no_second_generation),
                                ("_proactive_unanswered_pause_reason", self.unanswered_pause_reason),
+                               ("_reason_windows", self.reason_windows),
                                ("_mark_planned_candidate_status", self.mark_candidate_status),
                                ("_proactive_llm_segmenting_allowed", self.semantic_proactive_allowed),
                                ("_visible_text_without_tts_reading", self.visible_semantic_text),
@@ -472,8 +536,7 @@ class NativeProactiveBridge:
 
     def activate_native_config(self):
         """Arm only the pinned instance after all policy checks; never save config."""
-        if (self.original is None or not self.gate.enabled or not 0 < self.gate.start < self.gate.end
-                or self.gate.end-self.gate.start > 7*86400):
+        if self.original is None or not self.gate.enabled or not self.gate.approved_window_valid():
             raise PermissionError("attached_approved_window_required")
         # The pinned primary-persona accessor reads instance attributes. Keeping
         # the AstrBotConfig untouched prevents any UI/save/restart from arming it.
@@ -482,12 +545,18 @@ class NativeProactiveBridge:
         if not self._native_settings_active and (getattr(self.private,"max_daily_messages",0) != 0
                 or getattr(self.private,"enable_llm_proactive_message",False)):
             raise PermissionError("native_cold_start_must_be_disabled")
-        if self.gate.clock() >= self.gate.end:
+        if self.gate.expired():
             # An expired approval must not break the passive service on restart.
             self.gate.enabled=False
             self._disable_native_config()
             return False
-        self.private.max_daily_messages=min(2,self.gate.limit)
+        if not self._native_settings_active:
+            self._native_settings_before = {key: (hasattr(self.private, key), getattr(self.private, key, None))
+                for key in ('quiet_hours', 'min_interval_minutes')}
+        a, b = self.gate.quiet
+        self.private.quiet_hours = f'{a:02d}:00-{b:02d}:00' if a != b else ''
+        self.private.min_interval_minutes = math.ceil(self.gate.cooldown / 60)
+        self.private.max_daily_messages=self.gate.limit
         self.private.enable_llm_proactive_message=True
         self._native_settings_active=True
         return True
@@ -496,6 +565,12 @@ class NativeProactiveBridge:
         if self._native_settings_active:
             self.private.max_daily_messages=0
             self.private.enable_llm_proactive_message=False
+            for key, (present, value) in self._native_settings_before.items():
+                if present:
+                    setattr(self.private, key, value)
+                elif hasattr(self.private, key):
+                    delattr(self.private, key)
+            self._native_settings_before.clear()
             self._native_settings_active=False
 
     def detach(self):
@@ -512,7 +587,7 @@ class NativeProactiveBridge:
             self._additional_bindings.clear()
 
     async def scheduler_cycle(self, *, immediate=False):
-        if self.gate.clock() >= self.gate.end:
+        if self.gate.expired():
             self.gate.enabled=False
             self._disable_native_config()
         # Native max_daily=0 stops its proactive path while preserving its
@@ -548,7 +623,7 @@ class NativeProactiveBridge:
             if not status.get("eligible") or status.get("revision") != revision:
                 continue
             now=self.gate.clock()
-            expiry=min(now+3600,self.gate.end)
+            expiry=self.gate.candidate_expiry(now+3600)
             if item.get("expires_at"):
                 try:
                     parsed=datetime.fromisoformat(item["expires_at"])
@@ -595,9 +670,18 @@ class NativeProactiveBridge:
         if isinstance(user,dict) and user.get('umo') == self.gate.session:
             # Explicitly approved preference: unanswered does not disable all
             # new topics. The gate separately enforces spoken-topic cooldown,
-            # pauses, busy state, candidate lifecycle and the two-attempt cap.
+            # pauses, busy state, candidate lifecycle and the approved cap.
             return ''
         return self._additional_bindings['_proactive_unanswered_pause_reason'](user)
+
+    def reason_windows(self, reason, user=None):
+        # Native general conversation/follow-up reasons otherwise stop at 22:00
+        # or 23:00. Keep greeting/meal/birthday reasons' own semantic windows.
+        if (self.gate.mode == 'continuous' and self.gate.enabled
+                and self._native_settings_active and reason in self.CONTINUOUS_REASONS
+                and (user is None or isinstance(user, dict) and user.get('umo') == self.gate.session)):
+            return [(9 * 60, 24 * 60)]
+        return self._additional_bindings['_reason_windows'](reason, user)
 
     async def no_second_generation(self, user, *args, **kwargs):
         if str(user.get('umo') or '') in self._active_generations:
@@ -631,8 +715,10 @@ class NativeProactiveBridge:
         if not isinstance(native,dict):
             return
         now = self.gate.clock()
-        expiry = min(float(native.get('expire_at') or self.gate.end),
-                     float(decision.get('expires_at') or self.gate.end),self.gate.end)
+        previous = native.get('context') or {}
+        previous = previous.get('phase3_decision', {}) if isinstance(previous, dict) else {}
+        expiry = self.gate.candidate_expiry(native.get('expire_at'),
+            decision.get('expires_at'), previous.get('expires_at'))
         next_at = now + decision.get('delay_minutes',0)*60
         state = decision['decision']
         if state == 'defer' and next_at >= expiry:
@@ -644,6 +730,7 @@ class NativeProactiveBridge:
             'next_consider_at':next_at if state=='defer' else 0,
             'expires_at':expiry, 'reason':decision.get('reason','model_decision')}
         if state in {'defer','skip'}:
+            native['expire_at'] = expiry
             native['state'] = 'deferred' if state=='defer' else 'blocked'
             native['last_status'] = 'deferred' if state=='defer' else 'dropped'
             native['last_note'] = 'phase3_model_'+state
@@ -652,7 +739,6 @@ class NativeProactiveBridge:
                 native['window_start_at'] = next_at
                 native['preferred_ts'] = next_at
                 native['best_until_at'] = min(expiry,max(float(native.get('best_until_at') or 0),next_at))
-                native['expire_at'] = expiry
             # No deadline extension. If the native plan still points to this
             # impulse, keep its existing scheduler's time aligned.
             if user.get('planned_proactive_impulse_id') == native.get('id'):
@@ -708,15 +794,18 @@ class NativeProactiveBridge:
                     event_state = "not_yet"
         if native:
             now = self.gate.clock()
-            expiry = float(native.get('expire_at') or self.gate.end)
             evidence = native.get('context') or {}
             decision = evidence.get('phase3_decision',{}) if isinstance(evidence,dict) else {}
+            expiry = self.gate.candidate_expiry(native.get('expire_at'), decision.get('expires_at'))
             if expiry <= now:
                 event_state = 'expired'
             elif decision.get('decision') == 'skip':
                 event_state = 'cancelled'
             elif decision.get('decision') == 'defer' and now < float(decision.get('next_consider_at',0)):
                 event_state = 'not_yet'
+        elif self.gate.mode == 'continuous' and self.gate.candidate_expiry(
+                user.get('planned_proactive_expire_at')) <= self.gate.clock():
+            event_state = 'expired'
         reply_at = max((float(user.get(key) or 0) for key in
             ('last_user_message_at','last_private_seen','last_private_activity_at')),default=0)
         # Background discovery is a separate release. A native string claiming
@@ -761,9 +850,10 @@ class NativeProactiveBridge:
                 state = 'empty' if decision['reason']=='empty' else 'failed'
                 return ''
             if decision and decision['decision'] in {'defer','skip'}:
-                decision['expires_at'] = float(native.get('expire_at') or self.gate.end)
-                state = 'deferred' if decision['decision']=='defer' else 'skipped'
+                decision['expires_at'] = self.gate.candidate_expiry(native.get('expire_at'), old_decision.get('expires_at'))
                 self._record_decision(user,native,decision)
+                recorded = (native.get('context') or {}).get('phase3_decision', {})
+                state = 'deferred' if recorded.get('decision')=='defer' else 'skipped'
                 return ''
             state = "generated" if str(text or "").strip() else "empty"
             return str(text or "")
@@ -819,9 +909,14 @@ class NativeProactiveBridge:
             return self.outcome_type(False, False, note="phase3_candidate_scope_missing")
         if not await self.private._proactive_persona_delivery_allowed(umo):
             return self.outcome_type(False, False, note="persona_route_denied")
+        native = self.private._planned_proactive_impulse(user) or {}
+        evidence = native.get('context') or {}
+        decision = evidence.get('phase3_decision', {}) if isinstance(evidence, dict) else {}
+        expiry = self.gate.candidate_expiry(native.get('expire_at') if native else user.get('planned_proactive_expire_at'),
+                                            decision.get('expires_at'))
         async def dispatch():
             return await self.guard.send_proactive(umo, text, delivery_id="proactive:" + candidate_id,
-                is_current=lambda: self.gate.continuation_allowed(umo, topic_id=context["topic_id"],
+                is_current=lambda: self.gate.clock() < expiry and self.gate.continuation_allowed(umo, topic_id=context["topic_id"],
                                                                  busy=self.guard.session_busy(umo)))
         def observe():
             store = getattr(self.guard,'store',None)

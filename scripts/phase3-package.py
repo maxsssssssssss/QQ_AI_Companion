@@ -26,7 +26,8 @@ def files():
                     'tests/*phase3*.py','config/phase3-*.json','docs/phase3-*.md'):
         selected.update(ROOT.glob(pattern))
     selected.update(ROOT/p for p in ('README.md','docs/known-issues.md','docs/persona-integration.md',
-       'docs/private-profile-import.md','docs/natural-agent-validation.md','persona/phase3-v0.1.md'))
+       'docs/private-profile-import.md','docs/natural-agent-validation.md','persona/phase3-v0.1.md',
+       'persona/phase3-v0.2.md'))
     for p in selected:
         if not p.is_file() or p.is_symlink() or '__pycache__' in p.parts:
             raise ValueError('unsafe_or_missing_release_source')

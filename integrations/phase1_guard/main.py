@@ -6,12 +6,14 @@ non-streaming text profile, and clears that result to prevent a second dispatch.
 """
 
 import asyncio
+from dataclasses import replace
 import math
 import uuid
 
 from .delivery import DeliveryReceipt, DeliveryService
 from .turns import TurnCoordinator
-from .bubbles import Pacing, PROMPT, PROMPT_MARKER, semantic_text, send_sequence, sha, plain_qq_text
+from .bubbles import (Pacing, PROMPT, PROMPT_MARKER, semantic_plan, send_sequence, sha,
+                      plain_qq_text, candidate_boundaries, map_candidate_boundaries)
 
 from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, MessageChain, filter
@@ -32,10 +34,11 @@ class Phase1Guard(Star):
         self.phase3_enabled = config.get("phase3_enabled", False) is True
         self.phase3_proactive_enabled = config.get("phase3_proactive_enabled", False) is True
         self.multibubble_enabled = config.get("phase3_multibubble_enabled", True) is True
+        self.casual_split_fallback_enabled = config.get("phase3_casual_split_fallback_enabled", False) is True
         self.plain_text_enabled = config.get("phase3_plain_text_enabled", False) is True
         self.empty_recovery_enabled = config.get("phase3_empty_recovery_enabled", False) is True
-        self.pacing = Pacing(float(config.get('phase3_bubble_min_interval',.6)),
-                             float(config.get('phase3_bubble_max_interval',1.8)))
+        self.pacing = Pacing(float(config.get('phase3_bubble_min_interval',1.0)),
+                             float(config.get('phase3_bubble_max_interval',2.0)))
         self.stopping = False
         self._sending_tasks = set()
         self.phase3_admin_id = str(config.get("phase3_admin_id", ""))
@@ -194,8 +197,14 @@ class Phase1Guard(Star):
         result = event.get_result()
         if result is None or not result.chain:
             return
-        parts = self.semantic_parts(result)
-        if 1 < len(parts) <= 4:
+        parts = self.semantic_parts(result, event=event,
+            allow_fallback=self.casual_fallback_allowed(event))
+        source=event.get_extra('phase3_segment_plan', {}).get('source')
+        event.set_extra('phase3_casual_split_candidate', source=='smalltalk_fallback')
+        # Classify before native cleanup can remove fences, quotes or URLs.
+        # The late send hook must not reinterpret their cleaned text as chat.
+        event.set_extra("phase3_semantic_classified", True)
+        if source=='model_markers' and 1 < len(parts) <= 4:
             result.chain = [Plain(part.get_plain_text()) for part in parts]
             event.set_extra("phase3_semantic_boundaries", True)
 
@@ -209,16 +218,19 @@ class Phase1Guard(Star):
             task=asyncio.current_task()
             self._sending_tasks.add(task)
             try:
-                if not self.turn_is_current(event):
+                if not self.turn_is_current(event) or event.is_stopped():
                     return
                 kind = event.get_extra("phase3_delivery_kind", "normal")
                 if (event.get_extra("phase3_semantic_boundaries")
                         and 1 < len(result.chain) <= 4
                         and all(isinstance(part, Plain) for part in result.chain)):
                     parts = [result.derive([part]) for part in result.chain if part.text.strip()]
+                    parts=[self.qq_plain_chain(part) for part in parts]
                 else:
-                    parts = self.semantic_parts(result)
-                parts=[self.qq_plain_chain(part) for part in parts]
+                    parts = self.semantic_parts(result, event=event,
+                        allow_fallback=((not event.get_extra('phase3_semantic_classified')
+                                         or event.get_extra('phase3_casual_split_candidate'))
+                                        and self.casual_fallback_allowed(event)),format_for_send=True)
                 self.trace(event,'cleaned_final',{'parts':len(parts),
                     'chars':sum(len(p.get_plain_text()) for p in parts),
                     'sha256':sha('\n'.join(p.get_plain_text() for p in parts))})
@@ -229,10 +241,13 @@ class Phase1Guard(Star):
                     # Progress is a single separate bounded send, never a group.
                     await self.send_controlled(event,result,kind=kind)
                 else:
-                    await send_sequence(self.store,turn_id=event.get_extra('phase3_turn_id'),
+                    delivered = await send_sequence(self.store,turn_id=event.get_extra('phase3_turn_id'),
                         kind=kind,texts=[p.get_plain_text() for p in parts],send_part=send_part,
-                        is_current=lambda:self.turn_is_current(event),pacing=self.pacing,
+                        is_current=lambda:self.turn_is_current(event) and not event.is_stopped(),pacing=self.pacing,
                         generation_hash=event.get_extra('phase3_generation_hash',''))
+                    self.trace(event, 'cleaned_final', {'planned_parts':len(delivered.get('parts', [])),
+                        'confirmed_parts':delivered.get('sent_count', 0),
+                        'part_states':[p['state'] for p in delivered.get('parts', [])]})
                 self.turns.complete(event.get_extra("phase3_turn_id"))
             finally:
                 try:
@@ -241,6 +256,7 @@ class Phase1Guard(Star):
                     # A projection/ledger exception must never leave the
                     # original result available for native automatic resend.
                     event.clear_result()
+                    event.set_extra('phase3_casual_candidate', None)
                     self._sending_tasks.discard(task)
             return
         if not key or result is None or not result.chain:
@@ -427,8 +443,31 @@ class Phase1Guard(Star):
         if self.empty_recovery_enabled and self.turn_is_current(event):
             event.set_extra('phase3_generation_context', run_context)
 
+    @filter.on_agent_begin(priority=-3000000)
+    async def trace_final_bubble_prompt(self, event, run_context):
+        """Observe the built Agent system message, without storing its content."""
+        if not self.turn_is_current(event):return
+        try:
+            pieces=[]
+            for message in getattr(run_context, 'messages', []) or []:
+                if getattr(message, 'role', None) != 'system':continue
+                content=getattr(message, 'content', '')
+                pieces.append(content if isinstance(content, str) else
+                    ''.join(getattr(part, 'text', '') for part in content or []))
+            system='\n'.join(pieces)
+            self.trace(event, 'model_request', {'bubble_prompt':{
+                'present':PROMPT in system, 'marker_count':system.count(PROMPT_MARKER),
+                'prompt_sha256':sha(PROMPT), 'prompt_chars':len(PROMPT),
+                'scope':'built_agent_system_messages'}})
+        except Exception as exc:
+            logger.warning('Phase3 optional bubble request diagnostics unavailable: %s',type(exc).__name__)
+
     @filter.on_llm_response(priority=3000000)
     async def recover_empty_final(self, event, response):
+        # Read-only classification before native cleanup. Retain only hashes
+        # and offsets: these cannot restore text a later plugin removes.
+        event.set_extra('phase3_casual_candidate', None)
+        event.set_extra('phase3_original_casual_eligible', False)
         if response is not None:
             choices=getattr(getattr(response,'raw_completion',None),'choices',[]) or []
             reason=getattr(choices[0],'finish_reason',None) if choices else None
@@ -436,6 +475,24 @@ class Phase1Guard(Star):
                 'sha256':sha(response.completion_text or ''),
                 'has_tools':bool(response.tools_call_name),
                 'finish_reason':reason if reason in {'stop','length','tool_calls','content_filter'} else 'unavailable'})
+            # Native cleanup can strip protected formatting later. Keep only
+            # eligibility/counts, never a second copy of the response text.
+            if self.phase3_enabled and self.turn_is_current(event):
+                try:
+                    plan=semantic_plan(self.segment_parser(),response.completion_text or '',
+                        enabled=self.multibubble_enabled, fallback_enabled=True)
+                    diagnostic=self.segment_diagnostic(plan)
+                    diagnostic['candidate_parts']=diagnostic.pop('planned_parts')
+                    diagnostic.update(scope='raw_model_candidate',fallback_config_enabled=self.casual_split_fallback_enabled)
+                    self.trace(event, 'model_final', {'segment_plan':diagnostic})
+                    event.set_extra('phase3_original_casual_eligible',plan.source=='smalltalk_fallback')
+                    if (self.casual_split_fallback_enabled and self.casual_fallback_allowed(event)
+                            and not response.tools_call_name and not event.is_stopped()
+                            and plan.source=='smalltalk_fallback' and len(response.completion_text or '')<=100):
+                        event.set_extra('phase3_casual_candidate',
+                                        candidate_boundaries(response.completion_text))
+                except Exception as exc:
+                    logger.warning('Phase3 optional bubble response diagnostics unavailable: %s',type(exc).__name__)
         # Before native cleanup: a deliberately dropped nonempty response must
         # never be resurrected. This only repairs an already-empty generation.
         if (not self.empty_recovery_enabled or not self.turn_is_current(event)
@@ -543,7 +600,7 @@ class Phase1Guard(Star):
 
         outcome = await self.delivery.send(turn_id=turn_id, text=text, chain=chain, sender=sender,
                                             kind=kind, part_index=part_index, delivery_id=delivery_id,
-                                            is_current=lambda: self.turn_is_current(event))
+                                            is_current=lambda: self.turn_is_current(event) and not event.is_stopped())
         payload = {"platform": row["platform"], "session": row["session"], "turn_id": turn_id,
                    "source_message_ids": self.store.source_ids(turn_id), "text": text, "kind": kind,
                    "part_index": part_index, "delivery_id": outcome.delivery_id, "state": outcome.state}
@@ -579,11 +636,7 @@ class Phase1Guard(Star):
         if finalize:self.store.set_turn_state(turn_id, "done")
         return outcome
 
-    def semantic_parts(self, result):
-        """Reuse PrivateCompanion's actual semantic marker parser; never slice by length."""
-        text = result.get_plain_text()
-        if not all(isinstance(p, Plain) for p in result.chain):
-            return [result]
+    def segment_parser(self):
         import importlib
         parser = None
         for metadata in self.context.get_all_stars():
@@ -594,7 +647,67 @@ class Phase1Guard(Star):
                 except Exception:
                     pass
                 break
-        return [result.derive([Plain(part)]) for part in semantic_text(parser,text,enabled=self.multibubble_enabled)]
+        return parser
+
+    @staticmethod
+    def segment_diagnostic(plan):
+        return {key:getattr(plan,key) for key in ('source','reason','raw_marker_present',
+            'raw_exact_marker_count','native_count','native_controlled')} | {'planned_parts':len(plan.texts)}
+
+    def casual_fallback_allowed(self, event):
+        return (event.get_extra('phase3_delivery_kind', 'normal') not in {'progress','final'}
+                and not event.get_extra('phase3_search_executed')
+                and event.get_extra('phase3_original_casual_eligible', True))
+
+    def semantic_parts(self, result, *, event=None, allow_fallback=True, format_for_send=False):
+        """Pinned marker parsing first, optional bounded ordinary-chat fallback."""
+        text = result.get_plain_text()
+        if not all(isinstance(p, Plain) for p in result.chain):
+            return [result]
+        parser=self.segment_parser()
+        # Passive responses must use the pre-cleanup classification. Never
+        # reclassify a plugin's rewritten body into an eligible casual reply.
+        # Direct proactive text has no later native cleanup and is final here.
+        plan=semantic_plan(parser,text,enabled=self.multibubble_enabled,
+            fallback_enabled=self.casual_split_fallback_enabled and event is None,
+            allow_fallback=allow_fallback)
+        if (event is not None and self.casual_split_fallback_enabled and self.multibubble_enabled
+                and allow_fallback and self.casual_fallback_allowed(event)
+                and self.turn_is_current(event) and not event.is_stopped()
+                and plan.source=='single' and plan.reason=='fallback_disabled'):
+            candidate=event.get_extra('phase3_casual_candidate')
+            try:
+                mapped=map_candidate_boundaries(candidate,text)
+            except Exception:
+                mapped=None
+            if mapped and ''.join(mapped)==text:
+                plan=replace(plan,texts=mapped,source='smalltalk_fallback',
+                    reason=('candidate_exact' if sha(text)==candidate.raw_sha256
+                            else 'candidate_terminal_period_removed'))
+            else:
+                plan=replace(plan,reason=('fallback_cleaned_mismatch' if candidate is not None
+                                          else 'fallback_missing_candidate'))
+        elif (event is not None and self.casual_split_fallback_enabled
+                and plan.reason=='fallback_disabled'):
+            # The passive path deliberately disables fresh heuristics above;
+            # diagnostics must not describe that as the user's switch being off.
+            plan=replace(plan,reason=('fallback_context_excluded'
+                if event.get_extra('phase3_delivery_kind','normal') in {'progress','final'}
+                   or event.get_extra('phase3_search_executed')
+                else 'fallback_candidate_unavailable'))
+        if format_for_send and plan.source=='smalltalk_fallback':
+            # V3.1 accepts only plain unstructured prose. Formatting it again
+            # would strip edge whitespace or sentence punctuation, so send its
+            # exact slices after all native safety hooks have had their say.
+            parts=[result.derive([Plain(part)]) for part in plan.texts]
+        else:
+            parts=[result.derive([Plain(part)]) for part in plan.texts]
+            if format_for_send:parts=[self.qq_plain_chain(part) for part in parts]
+        if event is not None and (format_for_send or not event.get_extra('phase3_semantic_classified')):
+            diagnostic=self.segment_diagnostic(plan)
+            event.set_extra('phase3_segment_plan',diagnostic)
+            self.trace(event,'cleaned_final',{'segment_plan':diagnostic})
+        return parts
 
     def qq_plain_chain(self,result):
         if not self.plain_text_enabled or not all(isinstance(p,Plain) for p in result.chain):return result
@@ -653,7 +766,7 @@ class Phase1Guard(Star):
         if not self.store.get_turn(turn_id):
             self.store.create_turn(turn_id,self.phase3_platform_id,umo,proactive=True)
         from astrbot.api.event import MessageEventResult
-        parts=[self.qq_plain_chain(p) for p in self.semantic_parts(MessageEventResult().message(text))]
+        parts=self.semantic_parts(MessageEventResult().message(text),format_for_send=True)
         def last_input():
             return self.store.db.execute('SELECT max(rowid) FROM inbound WHERE platform=? AND session=?',
                 (self.phase3_platform_id,umo)).fetchone()[0]

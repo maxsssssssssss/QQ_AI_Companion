@@ -1,5 +1,9 @@
 # Phase 3 多气泡专项验收
 
+2026-10-24最新增量：[V3.1 清理兼容与离线验证](phase3-multibubble-v31-validation.md)。只保留清理前候选资格/哈希/切点，最终正文完全一致或仅末尾中文句号删除才映射；严格拼回最终正文，不恢复原文。本轮仅本地修改和测试，不部署、不重启，旧真实体验结果不自动覆盖 V3.1。
+
+2026-10-24新增[V3有限闲聊兜底](phase3-multibubble-v3-validation.md)。按用户最新要求保留全部提示词，核心人格仍V0.2；自动验证、窄发布和新增真实QQ结果单独记录，不覆盖以下历史验收或据此宣布整个Phase3通过。
+
 ## 2026-10-23 V2 增量与当前状态
 
 V2 候选已完成下述自动验证并安装到原 VPS；**以下为10-23历史切换；最新QQ已在线，本轮按用户豁免收尾，见文末**。22:56:39 +08:00 检查显示两个原容器 healthy、启动策略 PASS、47 个核对源文件哈希一致，但 NapCat 为 `waiting_qrcode`，保存的快捷登录账号列表为空、OneBot 已监听而连接数为 0。容器健康不能代替 QQ 在线或对话验收。生产安装与状态分别见私有证据 `four-capabilities-20261023/production-install-r2.json`、`production-health-r2.json`、`napcat-post-restart-diagnosis-r2.json`。

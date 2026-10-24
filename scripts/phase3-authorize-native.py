@@ -5,6 +5,7 @@ Default prepares a private backup and isolated candidate only. --apply requires
 --approved-target-migration. No service is stopped/started, no QQ process or model
 is launched, and no native global configuration is enabled. The existing image
 runs one networkless Python worker against a copy, using pinned native APIs.
+--daily-limit accepts 1 through 5; the default of 2 preserves trial preparation.
 """
 from __future__ import annotations
 
@@ -131,7 +132,13 @@ def native_modules(source):
         ('proactive', 'core_store', 'unified_profile_service', 'storage.json_backend'))
 
 
-def validate_delta(before, after, target_key):
+def check_daily_limit(daily_limit):
+    if type(daily_limit) is not int or not 1 <= daily_limit <= 5:
+        raise MigrationError('invalid_daily_limit')
+
+
+def validate_delta(before, after, target_key, *, daily_limit=2):
+    check_daily_limit(daily_limit)
     if not isinstance(before, dict) or not isinstance(after, dict):
         raise MigrationError('invalid_native_store')
     if {k:v for k,v in before.items() if k != 'users'} != {k:v for k,v in after.items() if k != 'users'}:
@@ -147,13 +154,16 @@ def validate_delta(before, after, target_key):
             k:v for k,v in new.items() if k not in ALLOWED_FIELDS}:
             raise MigrationError('unexpected_native_changes')
     target = new_users[target_key]
-    if target.get('proactive_private_enabled') is not True or target.get('proactive_daily_limit') != 2:
+    if (target.get('proactive_private_enabled') is not True
+            or type(target.get('proactive_daily_limit')) is not int
+            or target.get('proactive_daily_limit') != daily_limit):
         raise MigrationError('native_update_not_applied')
     if target.get('unified_profile_capabilities', {}).get('proactive_private_enabled') is not True:
         raise MigrationError('native_update_not_applied')
 
 
-def native_candidate(source, store_path, identity_path, output_path):
+def native_candidate(source, store_path, identity_path, output_path, *, daily_limit=2):
+    check_daily_limit(daily_limit)
     scheduler, core, capability, backend_module = native_modules(source)
     admin, platform = parse_identity(protected_read(identity_path)[0])
     before = json.loads(protected_read(store_path)[0])
@@ -186,8 +196,8 @@ def native_candidate(source, store_path, identity_path, output_path):
         target_identity=str(key), reason_code='phase3_approved_window')
     if outcome.get('ok') is not True or capability.capability_summary(user).get('portrait_mode') != old_portrait:
         raise MigrationError('native_capability_update_rejected')
-    user['proactive_daily_limit'] = 2
-    validate_delta(before, host.data, key)
+    user['proactive_daily_limit'] = daily_limit
+    validate_delta(before, host.data, key, daily_limit=daily_limit)
     if output_path.exists() or output_path.is_symlink():
         raise MigrationError('candidate_must_not_exist')
     old_mask = os.umask(0o077)
@@ -201,7 +211,7 @@ def native_candidate(source, store_path, identity_path, output_path):
     if saved != host.data: raise MigrationError('native_persistence_verification_failed')
     return {'status':'CANDIDATE_READY', 'native_version':PINNED_VERSION,
         'unique_existing_target':True, 'previously_authorized':was_enabled,
-        'daily_limit':2, 'native_api_called':True, 'native_atomic_save_used':True,
+        'daily_limit':daily_limit, 'native_api_called':True, 'native_atomic_save_used':True,
         'global_generation_enabled':False, 'real_qq':False, 'model_calls':0}
 
 
@@ -228,7 +238,8 @@ def stopped_image(deployment):
     return ids[0], image
 
 
-def run_worker(image, source, work):
+def run_worker(image, source, work, *, daily_limit=2):
+    check_daily_limit(daily_limit)
     for path in (source, work, Path(__file__).resolve()):
         if ',' in str(path) or '\n' in str(path): raise MigrationError('unsupported_mount_path')
     # Only the isolated copy is writable. Live data is never mounted here.
@@ -243,7 +254,8 @@ def run_worker(image, source, work):
         # This inspection worker has no live mount or service entrypoint; use
         # the image's documented inspection Python path, as the profile worker.
         '-e','PYTHONDONTWRITEBYTECODE=1','-e','PYTHONPATH=/AstrBot',
-        '--workdir','/tmp','--entrypoint','python',image,'/migration.py','--worker'], timeout=90)
+        '--workdir','/tmp','--entrypoint','python',image,'/migration.py','--worker',
+        '--daily-limit',str(daily_limit)], timeout=90)
     return json.loads(protected_read(work/'worker-result.json')[0])
 
 
@@ -263,8 +275,9 @@ def replace_preserving_owner(store, raw, info):
     if protected_read(store)[0]!=raw: raise MigrationError('applied_file_verification_failed')
 
 
-def _migrate_locked(deployment, backup_dir, *, apply=False, approved=False):
+def _migrate_locked(deployment, backup_dir, *, apply=False, approved=False, daily_limit=2):
     if approved is not True: raise MigrationError('explicit_target_migration_approval_required')
+    check_daily_limit(daily_limit)
     deployment = deployment.resolve()
     container, image = stopped_image(deployment)
     data = deployment/'state/data'
@@ -294,21 +307,23 @@ def _migrate_locked(deployment, backup_dir, *, apply=False, approved=False):
     if marker_raw: write_new(backup_dir/'backend-marker.before.json',marker_raw)
     before_hash = digest(raw)
     write_new(backup_dir/'backup-manifest.json', json_bytes({'created_at':datetime.now(timezone.utc).isoformat(),
-        'sha256':before_hash,'uid':info.st_uid,'gid':info.st_gid,'mode':'0600','native_version':PINNED_VERSION}))
+        'sha256':before_hash,'uid':info.st_uid,'gid':info.st_gid,'mode':'0600','native_version':PINNED_VERSION,
+        'daily_limit':daily_limit}))
     # The outer original-file lock serializes cooperating migrations. This
     # private operation marker remains with the backup for operator review.
     with (backup_dir/'migration.lock').open('x') as lock:
         os.chmod(lock.name,0o600)
         fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
-        result = run_worker(image,source,backup_dir)
+        result = run_worker(image,source,backup_dir,daily_limit=daily_limit)
         candidate = protected_read(backup_dir/'companions.after.json')[0]
         before,after=json.loads(raw),json.loads(candidate)
         admin,platform=parse_identity(identity_raw)
         keys=[key for key,user in before.get('users',{}).items() if isinstance(user,dict)
               and user.get('umo')==platform+':FriendMessage:'+admin]
         if len(keys)!=1: raise MigrationError('native_identity_missing_or_ambiguous')
-        validate_delta(before,after,keys[0])
-        if result.get('status')!='CANDIDATE_READY' or result.get('native_api_called') is not True:
+        validate_delta(before,after,keys[0],daily_limit=daily_limit)
+        if (result.get('status')!='CANDIDATE_READY' or result.get('native_api_called') is not True
+                or type(result.get('daily_limit')) is not int or result.get('daily_limit')!=daily_limit):
             raise MigrationError('invalid_worker_result')
         if stopped_image(deployment)!=(container,image): raise MigrationError('container_changed')
         if protected_read(store)[0]!=raw or protected_read(identity)[0]!=identity_raw or protected_read(config)[0]!=config_raw:
@@ -320,7 +335,7 @@ def _migrate_locked(deployment, backup_dir, *, apply=False, approved=False):
             replace_preserving_owner(store,candidate,info)
         report={'status':'APPLIED' if apply else 'PREPARED_NOT_APPLIED',
             'native_version':PINNED_VERSION,'backup_verified':True,'before_sha256':before_hash,
-            'candidate_sha256':digest(candidate),'unique_existing_target':True,'daily_limit':2,
+            'candidate_sha256':digest(candidate),'unique_existing_target':True,'daily_limit':daily_limit,
             'native_api_called':True,'global_generation_enabled':False,'service_started':False,
             'real_qq':False,'model_calls':0}
         try: write_new(backup_dir/'migration-result.json',json_bytes(report))
@@ -329,15 +344,16 @@ def _migrate_locked(deployment, backup_dir, *, apply=False, approved=False):
         return report
 
 
-def migrate(deployment, backup_dir, *, apply=False, approved=False):
+def migrate(deployment, backup_dir, *, apply=False, approved=False, daily_limit=2):
     if approved is not True: raise MigrationError('explicit_target_migration_approval_required')
+    check_daily_limit(daily_limit)
     stopped_image(deployment)
     store=deployment/'state/data/plugin_data/astrbot_plugin_private_companion/companions.json'
     fd=os.open(store,os.O_RDONLY|os.O_NOFOLLOW)
     with os.fdopen(fd,'rb') as lock:
         try: fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
         except BlockingIOError: raise MigrationError('another_migration_is_running') from None
-        return _migrate_locked(deployment,backup_dir,apply=apply,approved=approved)
+        return _migrate_locked(deployment,backup_dir,apply=apply,approved=approved,daily_limit=daily_limit)
 
 
 def rollback(deployment, backup_dir, *, approved=False):
@@ -369,6 +385,8 @@ def main():
     parser.add_argument('--deployment',type=Path,default=Path('/opt/qq-ai-companion/deployment'))
     parser.add_argument('--backup-dir',type=Path)
     parser.add_argument('--approved-target-migration',action='store_true')
+    parser.add_argument('--daily-limit',type=int,choices=range(1,6),default=2,
+        help='Per-target daily limit in the isolated candidate (default: 2).')
     parser.add_argument('--apply',action='store_true')
     parser.add_argument('--rollback',action='store_true',help='Restore an APPLIED backup only if the current file still matches its exact candidate hash.')
     parser.add_argument('--worker',action='store_true',help=argparse.SUPPRESS)
@@ -376,7 +394,7 @@ def main():
     try:
         if args.worker:
             result=native_candidate(Path('/native'),Path('/work/companions.before.json'),
-                Path('/work/identity.json'),Path('/work/companions.after.json'))
+                Path('/work/identity.json'),Path('/work/companions.after.json'),daily_limit=args.daily_limit)
             write_new(Path('/work/worker-result.json'),json_bytes(result))
         else:
             if args.backup_dir is None: raise MigrationError('new_backup_directory_required')
@@ -384,7 +402,8 @@ def main():
             if args.rollback:
                 result=rollback(args.deployment,args.backup_dir,approved=args.approved_target_migration)
             else:
-                result=migrate(args.deployment,args.backup_dir,apply=args.apply,approved=args.approved_target_migration)
+                result=migrate(args.deployment,args.backup_dir,apply=args.apply,
+                    approved=args.approved_target_migration,daily_limit=args.daily_limit)
         print(json.dumps(result,ensure_ascii=False))
         return 0
     except Exception as exc:

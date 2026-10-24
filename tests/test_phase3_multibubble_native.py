@@ -214,3 +214,245 @@ class NativeBubbleTests(unittest.IsolatedAsyncioTestCase):
         await self.proactive_setup()
         out=await self.guard.send_proactive('test:FriendMessage:10001','**主动正文**',delivery_id='plain-candidate')
         self.assertEqual(out['delivered_text'],'主动正文');self.assertEqual(out['state'],'sent')
+
+    async def v3_prepared(self, text='今天可算忙完了！今晚可以安心歇一会儿了。', kind='normal'):
+        self.parser();self.guard.casual_split_fallback_enabled=True
+        self.guard.pacing=Pacing(0,0)
+        event=self.event('合成闲聊');await self.ready(event)
+        event.set_extra('phase3_delivery_kind',kind)
+        history=Message(role='assistant',content=[TextPart(text=text)])
+        history._no_save=True
+        await self.guard.bind_delivery_history(event,types.SimpleNamespace(messages=[history]),None)
+        await self.guard.recover_empty_final(event,types.SimpleNamespace(
+            role='assistant',completion_text=text,tools_call_name=[]))
+        event.set_result(MessageEventResult().message(text))
+        return event,history
+
+    async def test_v3_no_marker_fallback_survives_native_cleanup_and_projects_two_acks(self):
+        event,history=await self.v3_prepared()
+        await self.guard.preserve_semantic_boundaries(event)
+        # Heuristic eligibility is preserved early; the actual split happens
+        # once after all whole-message cleanup, so spacing cannot be stripped
+        # independently at the start/end of a new component.
+        self.assertEqual(len(event.get_result().chain),1)
+        for part in event.get_result().chain:
+            part.text=self.parser().sanitize_llm_segment_control_tokens(part.text)
+        await self.guard.dispatch_text(event)
+        expected=['今天可算忙完了！','今晚可以安心歇一会儿了。']
+        self.assertEqual([r[1]['message'][0]['data']['text'] for r in self.calls],expected)
+        rows=self.guard.store.phase3_snapshot()['deliveries']
+        self.assertEqual([(r['part_index'],r['state'],r['text']) for r in rows],
+                         [(i,'sent',text) for i,text in enumerate(expected)])
+        self.assertEqual(self.history_text(history),'\n'.join(expected))
+
+    async def test_v31_complete_three_and_four_sentences_each_keep_native_guard_receipts(self):
+        sentences=['今天可算忙完了！','今晚可以安心歇一会儿了。',
+                   '明天的事就留给明天吧。','这会儿只想陪你随便聊聊。']
+        for count in (3,4):
+            with self.subTest(count=count):
+                expected=sentences[:count];text=''.join(expected);before=len(self.calls)
+                self.assertLessEqual(len(text),100)
+                event,history=await self.v3_prepared(text)
+                await self.guard.preserve_semantic_boundaries(event)
+                self.assertEqual(len(event.get_result().chain),1)
+                for part in event.get_result().chain:
+                    part.text=self.parser().sanitize_llm_segment_control_tokens(part.text)
+                await self.guard.dispatch_text(event)
+                actual=[row[1]['message'][0]['data']['text'] for row in self.calls[before:]]
+                self.assertEqual(actual,expected);self.assertEqual(''.join(actual),text)
+                result=self.guard.store.bubble_result(event.get_extra('phase3_turn_id'),'normal')
+                self.assertEqual([(p['part_index'],p['state'],
+                                   self.guard.store.get_delivery(p['delivery_id'])['text']) for p in result['parts']],
+                                 [(i,'sent',part) for i,part in enumerate(expected)])
+                self.assertEqual(self.history_text(history),'\n'.join(expected))
+
+    async def test_v31_short_sentences_merge_forward_and_trailing_short_merges_back(self):
+        first='今天可算忙完了！';second='今晚可以安心歇一会儿了。'
+        cases=[('终于忙完啦！'+second,['终于忙完啦！'+second]),
+               ('好耶！'+first+second,['好耶！'+first,second]),
+               (first+'好耶！'+second,[first,'好耶！'+second]),
+               (first+second+'嗯。',[first,second+'嗯。'])]
+        for text,expected in cases:
+            with self.subTest(text=text):
+                before=len(self.calls);event,history=await self.v3_prepared(text)
+                await self.guard.preserve_semantic_boundaries(event);await self.guard.dispatch_text(event)
+                actual=[row[1]['message'][0]['data']['text'] for row in self.calls[before:]]
+                self.assertEqual(actual,expected);self.assertEqual(''.join(actual),text)
+                self.assertEqual(self.history_text(history),'\n'.join(expected))
+
+    async def test_v31_pacing_waits_only_after_first_ack_and_is_bounded_one_to_two_seconds(self):
+        text='今天可算忙完了！今晚可以安心歇一会儿了。明天的事就留给明天吧。'
+        event,history=await self.v3_prepared(text)
+        self.guard.pacing=Pacing()
+        self.assertEqual((self.guard.pacing.minimum,self.guard.pacing.maximum),(1,2))
+        waits=[]
+        async def fake_interval(delay,is_current,**kwargs):
+            waits.append((len(self.calls),delay))
+            return is_current()
+        with patch('integrations.phase1_guard.bubbles.wait_between',side_effect=fake_interval):
+            await self.guard.preserve_semantic_boundaries(event);await self.guard.dispatch_text(event)
+        self.assertEqual([count for count,_ in waits],[1,2])
+        self.assertTrue(all(1<=delay<=2 for _,delay in waits))
+        self.assertEqual(len(self.calls),3)
+        self.assertEqual(self.history_text(history),'\n'.join(
+            row[1]['message'][0]['data']['text'] for row in self.calls))
+
+    async def test_v31_native_terminal_period_removal_maps_boundaries_without_restoring_text(self):
+        text='今天真的忙完啦！🎉  今晚可以安心歇一会儿了。'
+        cleaned=text[:-1]
+        expected=['今天真的忙完啦！🎉  ','今晚可以安心歇一会儿了']
+        event,history=await self.v3_prepared(text)
+        self.guard.plain_text_enabled=True
+        # Pinned Private 6.7.0's on_llm_response drops the terminal Chinese
+        # period before decoration. Map validated offsets to the cleaned text;
+        # never resurrect the period or any other removed source character.
+        event.set_result(MessageEventResult().message(cleaned))
+        await self.guard.preserve_semantic_boundaries(event);await self.guard.dispatch_text(event)
+        actual=[row[1]['message'][0]['data']['text'] for row in self.calls]
+        self.assertEqual(actual,expected);self.assertEqual(''.join(actual),cleaned)
+        self.assertNotEqual(''.join(actual),text)
+        self.assertEqual(self.history_text(history),'\n'.join(expected))
+
+    async def test_v31_candidate_rejects_text_changes_trim_crlf_empty_drop_stop_and_cancel(self):
+        raw='今天可算忙完了！今晚可以安心歇一会儿了。'
+        crlf=raw.replace('！','！\r\n')
+        cases=[('changed',raw,'今天终于轻松了！今晚可以安心歇一会儿了。'),
+               ('trim','  '+raw+'  ',raw),
+               ('crlf',crlf,crlf.replace('\r\n','\n')),
+               ('empty',raw,''),('dropped',raw,None),
+               ('stopped',raw,raw),('cancelled',raw,raw)]
+        for mode,source,cleaned in cases:
+            with self.subTest(mode=mode):
+                before=len(self.calls);event,history=await self.v3_prepared(source)
+                self.guard.plain_text_enabled=True
+                if mode=='dropped':
+                    event.clear_result()
+                else:event.set_result(MessageEventResult().message(cleaned))
+                if mode=='stopped':event.stop_event()
+                if mode=='cancelled':event.set_extra('phase3_cancelled',True)
+                await self.guard.preserve_semantic_boundaries(event);await self.guard.dispatch_text(event)
+                actual=[row[1]['message'][0]['data']['text'] for row in self.calls[before:]]
+                expected=[cleaned] if mode in {'changed','trim','crlf'} else []
+                self.assertEqual(actual,expected)
+                if expected:
+                    self.assertEqual(''.join(actual),cleaned)
+                    self.assertEqual(self.history_text(history),cleaned)
+
+    async def test_v3_marker_priority_keeps_three_parts_and_fallback_can_be_disabled(self):
+        text='今天可算忙完了！今晚可以安心歇一会儿了。\n'+MARKER+'\n真开心。\n'+MARKER+'\n好呀🙂'
+        event,_=await self.v3_prepared(text)
+        await self.guard.preserve_semantic_boundaries(event);await self.guard.dispatch_text(event)
+        self.assertEqual(len(self.calls),3)
+        self.assertEqual(self.calls[0][1]['message'][0]['data']['text'],'今天可算忙完了！今晚可以安心歇一会儿了。')
+        event,_=await self.v3_prepared()
+        self.guard.casual_split_fallback_enabled=False
+        await self.guard.preserve_semantic_boundaries(event);await self.guard.dispatch_text(event)
+        self.assertEqual(len(self.calls),4)
+        self.assertEqual(self.calls[-1][1]['message'][0]['data']['text'],'今天可算忙完了！今晚可以安心歇一会儿了。')
+
+    async def test_v3_search_progress_and_final_exclude_fallback_before_final_kind_changes(self):
+        text='今天可算忙完了！今晚可以安心歇一会儿了。'
+        for kind,search in [('progress',False),('final',False),('normal',True)]:
+            event,_=await self.v3_prepared(text,kind)
+            if search:event.set_extra('phase3_search_executed',True)
+            await self.guard.preserve_semantic_boundaries(event)
+            if search:event.set_extra('phase3_delivery_kind','final')
+            await self.guard.dispatch_text(event)
+        self.assertEqual([r[1]['message'][0]['data']['text'] for r in self.calls],[text]*3)
+
+    async def test_v3_structured_reply_cannot_be_split_after_markdown_cleanup(self):
+        for text in ['好呀🙂','> 今天可算忙完了！今晚可以安心歇一会儿了。',
+                     '```text\n今天可算忙完了！今晚可以安心歇一会儿了。\n```',
+                     '查阅 https://example.invalid/doc 。下一步请对照文档。']:
+            event,history=await self.v3_prepared(text)
+            await self.guard.preserve_semantic_boundaries(event)
+            self.assertEqual(len(event.get_result().chain),1)
+            # Simulate a later optional decorator stripping source structure;
+            # Guard must not re-classify the cleaned text as casual chat.
+            from integrations.phase1_guard.bubbles import plain_qq_text
+            for part in event.get_result().chain:part.text=plain_qq_text(part.text)
+            await self.guard.dispatch_text(event)
+            self.assertEqual(self.history_text(history),self.calls[-1][1]['message'][0]['data']['text'])
+        self.assertEqual(len(self.calls),4)
+
+    async def test_v3_fallback_interjection_preserves_only_confirmed_prefix(self):
+        event,history=await self.v3_prepared();follow=self.event('先停一下，已经解决')
+        async def after(payload):
+            if payload['part_index']==0:await self.guard.claim_inbound(follow)
+        self.guard.register_delivery_observer(after)
+        await self.guard.preserve_semantic_boundaries(event);await self.guard.dispatch_text(event)
+        self.assertEqual(len(self.calls),1)
+        self.assertTrue(self.history_text(history).startswith('今天可算忙完了！'))
+        self.assertNotIn('今晚可以安心歇一会儿了',self.history_text(history))
+        self.assertIn('其余气泡未确认送达',self.history_text(history))
+        result=self.guard.store.bubble_result(event.get_extra('phase3_turn_id'),'normal')
+        self.assertEqual([p['state'] for p in result['parts']],['sent','cancelled'])
+
+    async def test_v31_native_stop_after_first_ack_cancels_tail_without_second_api(self):
+        event,history=await self.v3_prepared()
+        async def after(payload):
+            if payload['part_index']==0:event.stop_event()
+        self.guard.register_delivery_observer(after)
+        await self.guard.preserve_semantic_boundaries(event);await self.guard.dispatch_text(event)
+        self.assertTrue(event.is_stopped())
+        self.assertEqual([row[1]['message'][0]['data']['text'] for row in self.calls],
+                         ['今天可算忙完了！'])
+        result=self.guard.store.bubble_result(event.get_extra('phase3_turn_id'),'normal')
+        self.assertEqual([p['state'] for p in result['parts']],['sent','cancelled'])
+        self.assertEqual([p['transport_attempts'] for p in result['parts']],[1,0])
+        self.assertEqual(result['delivered_text'],'今天可算忙完了！')
+        self.assertTrue(self.history_text(history).startswith('今天可算忙完了！'))
+        self.assertNotIn('今晚可以安心歇一会儿了',self.history_text(history))
+        self.assertIn('其余气泡未确认送达',self.history_text(history))
+
+    async def test_v3_fallback_failure_persists_without_group_resend_on_restart(self):
+        event,history=await self.v3_prepared()
+        async def after(payload):self.mode='reject'
+        self.guard.register_delivery_observer(after)
+        await self.guard.preserve_semantic_boundaries(event);await self.guard.dispatch_text(event)
+        self.assertEqual(len(self.calls),2)
+        self.assertTrue(self.history_text(history).startswith('今天可算忙完了！'))
+        self.assertNotIn('今晚可以安心歇一会儿了',self.history_text(history))
+        self.assertIn('其余气泡未确认送达',self.history_text(history))
+        tid=event.get_extra('phase3_turn_id')
+        before=self.guard.store.bubble_result(tid,'normal')
+        self.assertEqual([p['state'] for p in before['parts']],['sent','failed'])
+        await self.guard.terminate()
+        self.guard=base.Phase1Guard(self.context,{'phase3_enabled':True,'phase3_admin_id':'10001',
+            'phase3_platform_id':'test','phase3_casual_split_fallback_enabled':True,
+            'phase3_group_window':.01,'phase3_group_max_wait':.03,'send_timeout_seconds':2.0})
+        self.assertEqual(self.guard.store.bubble_result(tid,'normal'),before)
+        await asyncio.sleep(.01)
+        self.assertEqual(len(self.calls),2)
+
+    async def test_v3_proactive_plain_text_uses_same_fallback_acl_and_independent_receipts(self):
+        await self.proactive_setup();self.guard.casual_split_fallback_enabled=True
+        expected=['今天可算忙完了！','今晚可以安心歇一会儿了。','明天的事就留给明天吧。']
+        text=''.join(expected)
+        with self.assertRaises(PermissionError):
+            await self.guard.send_proactive('test:FriendMessage:10002',text,delivery_id='wrong-v3')
+        result=await self.guard.send_proactive('test:FriendMessage:10001',text,delivery_id='v3-candidate')
+        again=await self.guard.send_proactive('test:FriendMessage:10001',text,delivery_id='v3-candidate')
+        self.assertEqual(result,again);self.assertEqual(len(self.calls),3)
+        self.assertEqual(result['delivered_text'],'\n'.join(expected))
+        self.assertEqual(result['sent_count'],3)
+        self.assertEqual([r['kind'] for r in self.guard.store.phase3_snapshot()['deliveries']],['proactive']*3)
+
+    async def test_v3_exact_spacing_and_emoji_survive_passive_and_proactive_delivery(self):
+        text='今天真的忙完啦！🎉  今晚可以安心歇一会儿了。  明天的事就留给明天吧！'
+        event,history=await self.v3_prepared(text)
+        self.guard.plain_text_enabled=True
+        await self.guard.preserve_semantic_boundaries(event);await self.guard.dispatch_text(event)
+        bodies=[row[1]['message'][0]['data']['text'] for row in self.calls]
+        self.assertEqual(len(bodies),3)
+        self.assertEqual(''.join(bodies),text)
+        self.assertEqual(bodies[0],'今天真的忙完啦！🎉  ')
+        self.assertEqual(bodies[1],'今晚可以安心歇一会儿了。  ')
+        self.assertEqual(bodies[2],'明天的事就留给明天吧！')
+        await self.proactive_setup()
+        result=await self.guard.send_proactive('test:FriendMessage:10001',text,delivery_id='v3-spacing')
+        outgoing=[row[1]['message'][0]['data']['text'] for row in self.calls[3:]]
+        self.assertEqual(outgoing,bodies)
+        self.assertEqual(result['sent_count'],3)
+        self.assertEqual(result['delivered_text'],'\n'.join(outgoing))
+        self.assertEqual(self.history_text(history),'\n'.join(bodies))

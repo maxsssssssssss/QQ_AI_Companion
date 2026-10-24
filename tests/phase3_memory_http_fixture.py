@@ -90,6 +90,24 @@ class MemoryMockLLM(MockLLM):
         if latest.startswith('隔离多气泡实际装饰链'):
             return self.response(body, {'role':'assistant',
                 'content':'**合成问候。**\n<<PRIVATE_COMPANION_SPLIT>>\n合成鼓励。'}, 'semantic_bubbles')
+        v3_replies = {
+            '隔离V3普通两句': ('今天可算忙完了！今晚可以安心歇一会儿了。', 'v3_casual_fallback'),
+            '隔离V31普通三句': ('今天真的忙完啦！🎉  今晚可以安心歇一会儿了。  明天的事就留给明天吧！',
+                          'v31_three_fallback'),
+            '隔离V31普通四句': ('今天可算忙完了！今晚可以安心歇一会儿了。明天的事就留给明天吧。这会儿只想陪你随便聊聊。',
+                          'v31_four_fallback'),
+            '隔离V3短单句': ('好呀🙂', 'v3_short_single'),
+            '隔离V31短句合并': ('终于忙完啦！今晚可以安心歇一会儿了。', 'v31_short_merged'),
+            '隔离V3连续长句': ('今天这场讨论从最开始的计划聊到后来的调整又聊回最近的小事，'
+                '我想先把这些连在一起听明白再接着说，所以这一段完整地留在一条消息里', 'v3_continuous_single'),
+            '隔离V3技术结构': ('事务需要同时保证提交和回滚的边界。下面是完整示例。\n'
+                '```sql\nBEGIN;\nUPDATE demo SET value = 2 WHERE id = 1;\nCOMMIT;\n```\n'
+                '最后检查提交结果，不能把未提交的改动视为成功。', 'v3_technical_single'),
+            '隔离V3重启后继续': ('还在呢🙂', 'v3_restart_single'),
+        }
+        for prefix, (answer, kind) in v3_replies.items():
+            if latest.startswith(prefix):
+                return self.response(body, {'role':'assistant','content':answer}, kind)
         if latest.startswith('隔离空正文工具回复'):
             if messages[-1].get('role') == 'system':
                 assert any(m.get('role')=='tool' for m in messages)

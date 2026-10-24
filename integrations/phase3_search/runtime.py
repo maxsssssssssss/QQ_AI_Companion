@@ -61,6 +61,13 @@ class SearchRuntime:
         self.metrics = {"progress_calls": 0, "search_calls": 0, "fetch_calls": 0,
                         "blocked_calls": 0, "tool_failures": 0, "progress_input_tokens": 0, "progress_output_tokens": 0}
 
+    @staticmethod
+    def current_input(event):
+        # Guard records this before any memory injection. Never derive external
+        # query permission from req.prompt, Agent history or model-supplied args.
+        grouped = event.get_extra("phase3_grouped_text")
+        return grouped if isinstance(grouped, str) else (event.message_str or "")
+
     def authorized(self, event, *, key_ready):
         if not self.enabled or not key_ready or not self.admin_id or not self.platform_id:
             raise Rejected("search_not_ready")
@@ -71,7 +78,8 @@ class SearchRuntime:
         if (event.get_extra("agent_stop_requested") or event.get_extra("phase3_cancelled")
                 or not self.guard.turn_is_current(event)):
             raise Rejected("turn_cancelled_or_superseded")
-        if NO_WEB.search(event.message_str or "") or event.get_extra("phase3_no_web"):
+        if (NO_WEB.search(self.current_input(event)) or NO_WEB.search(event.message_str or "")
+                or event.get_extra("phase3_no_web")):
             raise Rejected("user_forbids_web")
         turn_id = event.get_extra("phase3_turn_id")
         if not isinstance(turn_id, str) or not turn_id:
@@ -145,17 +153,23 @@ class SearchRuntime:
         ready = key_ready if callable(key_ready) else lambda: key_ready
         try:
             turn_id = self.authorized(event, key_ready=ready())
-            sanitized = await self.policy.arguments(native.name, arguments)
+            if not isinstance(arguments, dict):
+                raise Rejected("invalid_arguments")
             state = self.state(turn_id)
             state.event = event
+            source_text = self.current_input(event)
+            if native.name == FETCH:
+                explicit_urls = set(re.findall(r"https?://[^\s<>\"，。！？]+", source_text))
+                # Establish provenance BEFORE even DNS resolution: a model may
+                # invent a subdomain that would leak private context via DNS.
+                url = arguments.get("url")
+                if not isinstance(url, str) or url not in state.source_urls | explicit_urls:
+                    raise Rejected("fetch_url_has_no_public_source")
+            sanitized = await self.policy.arguments(native.name, arguments, source_text=source_text)
             async with state.lock:
                 self.authorized(event, key_ready=ready())
                 if self.clock()-state.started >= self.limits.turn_timeout or state.calls >= self.limits.max_calls:
                     raise Rejected("search_budget_exhausted")
-                if native.name == FETCH:
-                    explicit_urls = set(re.findall(r"https?://[^\s<>\"，。！？]+", event.message_str or ""))
-                    if sanitized["url"] not in state.source_urls | explicit_urls:
-                        raise Rejected("fetch_url_has_no_public_source")
                 signature = hashlib.sha256(json.dumps([native.name,sanitized],sort_keys=True).encode()).hexdigest()
                 if signature in state.results:
                     return state.results[signature]
