@@ -19,7 +19,9 @@ async def run_probe(core,runtime):
     result['decision_cases']={key:{k:value[k] for k in
         ('pass','candidate_accepted','metrics','new_deliveries','generation_states','decision_metadata')}
         for key,value in cases.items()}
-    result['pass']=all(value['pass'] for value in cases.values())
+    from test_phase3_proactive_plan_native import run_probe as run_plan_probe
+    result['cold_plan_recovery']=await run_plan_probe(core,runtime)
+    result['pass']=all(value['pass'] for value in cases.values()) and result['cold_plan_recovery']['pass']
     return result
 
 

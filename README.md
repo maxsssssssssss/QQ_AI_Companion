@@ -1,5 +1,7 @@
 # QQ AI Companion
 
+2026-10-24最新维护：[主动空计划恢复](docs/phase3-proactive-plan-recovery.md)。修复长期主动启用后候选仍为空的启动缺口；沿用原生调度、当前模型及Guard，主动次数和时段保持。发布只更新一个桥接源码并重启AstrBot，保留NapCat、现有聊天和记忆；验证与上线结果见报告。
+
 基于 AstrBot 的独立集成项目。**Phase 1 的离线集成交付已保留；Phase 2 已完成 VPS 部署、真实 DeepSeek 与 QQ 文本/图片私聊、归档、隔离备份恢复及一次 QQ 重启登录/协议恢复，当前总状态为 PARTIAL。** 真实非授权账号负例和长期稳定性仍需验收。Phase 1 使用合成 OneBot v11 事件和 Mock LLM，在断网容器内运行真实 AstrBot、原生适配器、模型 provider、数据库和所选插件。
 
 最终 P0 判定、逐项证据与剩余限制见 [Phase 1 验收报告](docs/phase1-validation.md)和[最终交付报告](docs/delivery-report.md)。启动成功、doctor 通过或单个测试返回零，都不能代替全部 P0 验收结论。

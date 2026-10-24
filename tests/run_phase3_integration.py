@@ -360,10 +360,15 @@ class Suite:
             assert proactive_requests and all(not r['request'].get('tools') for r in proactive_requests)
             # The probe emits a real synthetic OneBot proactive action; consume
             # that observation before subsequent user-response assertions.
-            while not self.peer.outgoing.empty(): self.peer.outgoing.get_nowait()
-            assert len(proactive_requests)==3
+            proactive_actions = []
+            while not self.peer.outgoing.empty(): proactive_actions.append(self.peer.outgoing.get_nowait())
+            assert len(proactive_actions) == 4, proactive_actions
+            proactive_rows = [r for r in self.rows('deliveries') if r['kind'] == 'proactive']
+            assert len(proactive_rows) == 4 and all(r['state'] == 'sent' for r in proactive_rows), proactive_rows
+            assert len(proactive_requests)==6
             assert all(not r['request'].get('tools') for r in proactive_requests)
-            self.record('I11', 'Pinned Private candidates exercised defer/skip/send in one model request each; only send produced two Guard bubbles and native Memory event acknowledgement')
+            assert probe['cold_plan_recovery']['pass']
+            self.record('I11', 'Pinned Private event and cold-start candidates each exercised defer/skip/send with one HTTP model request; cold config 0 recovered via native scheduler/tick, expiry and restart; only send produced four total Guard-confirmed bubbles')
             before=len(self.chat_requests())
             reply=await self.peer.send('隔离空正文工具回复：只依据资料回答。',timeout=40)
             assert '合成资料补答成功' in action_text(reply)

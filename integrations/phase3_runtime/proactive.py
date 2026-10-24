@@ -594,7 +594,160 @@ class NativeProactiveBridge:
         # passive-cache maintenance. The per-user/model gates still reject all
         # attempts outside the approved daytime/window; no second timer exists.
         await self.offer_due_event()
+        await self.maintain_native_plan()
         return await self._additional_bindings["_run_scheduler_cycle"](immediate=immediate)
+
+    def _plan_observation(self, reason, *, user=None, repaired=False, retired=False):
+        """Fixed status metadata in the existing native runtime, never content."""
+        self.metrics['plan_maintenance_reason'] = reason
+        data = getattr(self.private, 'data', None)
+        if not isinstance(data, dict):
+            return reason
+        runtime = data.setdefault('proactive_runtime', {})
+        if not isinstance(runtime, dict):
+            return reason
+        previous = runtime.get('phase3_plan_maintenance') or {}
+        if not isinstance(previous, dict):
+            previous = {}
+        def count(key):
+            value = previous.get(key, 0)
+            return value if type(value) is int and value >= 0 else 0
+        def timestamp(value):
+            try:
+                value = float(value or 0)
+                return value if math.isfinite(value) and value >= 0 else 0
+            except (TypeError, ValueError):
+                return 0
+        runtime['phase3_plan_maintenance'] = {
+            'reason': reason, 'checked_at': self.gate.clock(),
+            'next_consider_at': timestamp((user or {}).get('next_proactive_at')),
+            'expires_at': timestamp((user or {}).get('planned_proactive_expire_at')),
+            'repair_count': count('repair_count') + int(repaired),
+            'retired_count': count('retired_count') + int(retired),
+            'error_count': count('error_count') + int(reason == 'maintenance_error'),
+        }
+        self.private._schedule_data_save(sections={'proactive_runtime'})
+        return reason
+
+    def _plan_retirement_reason(self, user, native, candidate_id, context):
+        """A terminal/consumed plan can only be retired, never regenerated."""
+        if candidate_id and self.gate.db.execute(
+                'SELECT 1 FROM proactive_attempts WHERE candidate=?', (candidate_id,)).fetchone():
+            return 'attempt_consumed'
+        if context['event_state'] in {'expired', 'completed', 'answered', 'responded',
+                                      'cancelled', 'do_not_discuss'}:
+            return 'plan_expired' if context['event_state'] == 'expired' else 'plan_terminal'
+        if context['topic_id'] and self.gate._get('blocked:' + context['topic_id']):
+            return 'topic_suppressed'
+        if candidate_id:
+            evidence = native.get('context') or {}
+            decision = evidence.get('phase3_decision', {}) if isinstance(evidence, dict) else {}
+            evaluation_id = candidate_id
+            if decision.get('decision') == 'defer':
+                evaluation_id += ':reconsider:' + str(int(decision.get('next_consider_at', 0)))
+            generated = self.gate.db.execute(
+                'SELECT state FROM proactive_generations WHERE candidate=?', (evaluation_id,)).fetchone()
+            if generated:
+                return 'generation_consumed'
+        stale = getattr(self.private, '_is_proactive_plan_stale', None)
+        if callable(stale) and stale(user, now=self.gate.clock()):
+            return 'plan_expired'
+        return ''
+
+    def _retire_native_plan(self, user, reason):
+        # Preserve original IDs and Guard/generation ledger entries. Native
+        # "failed" maps an impulse back to queued, so use terminal "dropped".
+        self.private._mark_planned_candidate_status(user, 'dropped', 'phase3_' + reason)
+        self.private._clear_pending_proactive_send_retry(user)
+        self.private._clear_pending_proactive_plan(user)
+        self.private._schedule_data_save(sections={'users', 'proactive_candidate_pool'})
+
+    async def maintain_native_plan(self):
+        """Repair native cold/expired plans before the guarded tick, without I/O.
+
+        Private cold-start settings deliberately disable generation and clear
+        plans. Once approved instance settings are armed, the delivery gate must
+        not stop its *local* planning entry from ever becoming reachable. This
+        runs once per existing native cycle and only under its own data lock;
+        generation, timing, eligibility and delivery still pass their old gates.
+        """
+        if not self._native_settings_active:
+            return 'native_not_active'
+        required = ('_schedule_next_proactive', '_clear_pending_proactive_plan',
+                    '_mark_planned_candidate_status', '_clear_pending_proactive_send_retry',
+                    '_user_enabled_for_proactive', '_proactive_generation_disabled',
+                    '_schedule_data_save')
+        lock = getattr(self.private, '_data_lock', None)
+        if lock is None or not hasattr(lock, '__aenter__') or any(
+                not callable(getattr(self.private, name, None)) for name in required):
+            self.metrics['plan_maintenance_reason'] = 'native_api_unavailable'
+            return 'native_api_unavailable'
+        try:
+            async with lock:
+                try:
+                    user_id, user = resolve_native_target(self.private, self.gate.session)
+                except PermissionError:
+                    return self._plan_observation('identity_unavailable')
+                # This sentinel is only a read-only admission query, never a
+                # candidate, generation, send attempt or quota reservation.
+                admission = self.gate.permit(self.gate.session,
+                    candidate_id='phase3_local_plan_maintenance', source='want_to_chat',
+                    busy=self.guard.session_busy(self.gate.session))
+                if admission != 'allowed':
+                    return self._plan_observation(admission, user=user)
+                if self.gate.session in self._active_generations:
+                    return self._plan_observation('generation_in_progress', user=user)
+                if (not self.private._user_enabled_for_proactive(user_id, user)
+                        or self.private._proactive_generation_disabled(user)):
+                    return self._plan_observation('native_not_authorized', user=user)
+                day = datetime.fromtimestamp(self.gate.clock(), ZoneInfo('Asia/Shanghai')).date().isoformat()
+                count = self.gate.db.execute(
+                    'SELECT count(*) FROM proactive_generations WHERE day=?', (day,)).fetchone()[0]
+                if count >= self.gate.generation_limit:
+                    return self._plan_observation('generation_budget', user=user)
+                session, candidate_id, _, context = await self._context(user)
+                native = self.private._planned_proactive_impulse(user) or {}
+                reason = self._plan_retirement_reason(user, native, candidate_id, context)
+                next_at = float(user.get('next_proactive_at') or 0)
+                if not reason and candidate_id and next_at > 0:
+                    return self._plan_observation(
+                        'waiting' if next_at > self.gate.clock() else 'plan_due', user=user)
+                retired = bool(reason and candidate_id)
+                if retired:
+                    self._retire_native_plan(user, reason)
+                else:
+                    self.private._clear_pending_proactive_plan(user)
+                # No delay override, synthetic topic or forced due time. Fixed
+                # native candidate selection chooses the next local opportunity.
+                self.private._schedule_next_proactive(user, now=self.gate.clock())
+                self.private._schedule_data_save(sections={'users', 'proactive_candidate_pool'})
+                _, new_id, _, new_context = await self._context(user)
+                new_native = self.private._planned_proactive_impulse(user) or {}
+                # Native may pick a different stored candidate. Do not give an
+                # already-consumed candidate a new send/retry opportunity.
+                invalid = self._plan_retirement_reason(user, new_native, new_id, new_context)
+                if new_id and invalid:
+                    self._retire_native_plan(user, invalid)
+                    return self._plan_observation('native_candidate_retired', user=user,
+                        repaired=True, retired=True)
+                scheduled = bool(new_id and float(user.get('next_proactive_at') or 0) > 0)
+                return self._plan_observation('scheduled' if scheduled else 'no_candidate',
+                    user=user, repaired=True, retired=retired)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            # A local maintenance failure cannot enable a send or break passive
+            # chat. Do not publish exception text (it can contain private data).
+            self.metrics['plan_maintenance_reason'] = 'maintenance_error'
+            self.metrics['plan_maintenance_errors'] = self.metrics.get('plan_maintenance_errors', 0) + 1
+            try:
+                async with lock:
+                    self._plan_observation('maintenance_error')
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                pass  # If the native store itself failed, retain the metric.
+            return 'maintenance_error'
 
     async def offer_due_event(self):
         """Feed confirmed due facts into the existing native candidate admission."""
@@ -696,7 +849,9 @@ class NativeProactiveBridge:
         if attempted is not None:
             native = self.private._planned_proactive_impulse(user)
             if isinstance(native,dict):
-                context = native.setdefault('context',{})
+                context = native.get('context')
+                if context is None:
+                    context = native['context'] = {}
                 if isinstance(context,dict):
                     context['phase3_delivery'] = {'state':attempted[0], 'sent_count':attempted[1],
                                                  'part_count':attempted[2]}
@@ -723,7 +878,11 @@ class NativeProactiveBridge:
         state = decision['decision']
         if state == 'defer' and next_at >= expiry:
             state = 'skip'
-        context = native.setdefault('context',{})
+        # Pinned random impulses legitimately start with context=None. This
+        # is an empty native metadata slot, not an invalid payload to overwrite.
+        context = native.get('context')
+        if context is None:
+            context = native['context'] = {}
         if not isinstance(context,dict):
             return
         context['phase3_decision'] = {'decision':state, 'decided_at':now,
@@ -797,7 +956,9 @@ class NativeProactiveBridge:
             evidence = native.get('context') or {}
             decision = evidence.get('phase3_decision',{}) if isinstance(evidence,dict) else {}
             expiry = self.gate.candidate_expiry(native.get('expire_at'), decision.get('expires_at'))
-            if expiry <= now:
+            if str(native.get('state') or '') in {'sent', 'blocked', 'cancelled', 'dropped', 'failed', 'unknown'}:
+                event_state = 'completed' if native.get('state') == 'sent' else 'cancelled'
+            elif expiry <= now:
                 event_state = 'expired'
             elif decision.get('decision') == 'skip':
                 event_state = 'cancelled'

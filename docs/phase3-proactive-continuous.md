@@ -1,5 +1,7 @@
 # 长期主动聊天候选（2026-10-24）
 
+后续增量：[空计划恢复](phase3-proactive-plan-recovery.md)。开启实例配置后的冷启动计划补建已纳入原生周期；合法延后保持，终态候选不重发，5次评估/5次尝试/3小时间隔和每日09:00–23:59规则不变。具体上线及证据以该增量报告为准。
+
 ## 后续统一发布状态
 
 2026-10-24用户明确授权让最新代码与相应配置运行后，长期规则已安装；Runtime.proactive与Guard.phase3_proactive_enabled为true，已核验的唯一目标通过原生API迁移为daily_limit=5。Private磁盘全局生成仍为false/0，必须由Runtime完成检查并绑定桥接后才能在实例内启用。固定镜像容器已重新创建，**05:10:10 +08:00启动policy/readiness核对PASS，持久账本状态为QUIET_HOURS，评估和发送均0**。未发送新的QQ验收消息，也不将配置ON作为真实主动体验PASS。旧72小时试验豁免记录保留，但不再是本次已授权的长期运行策略。见[本次发布](phase3-fresh-start-release.md)。
