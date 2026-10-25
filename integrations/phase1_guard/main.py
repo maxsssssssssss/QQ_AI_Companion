@@ -13,7 +13,8 @@ import uuid
 from .delivery import DeliveryReceipt, DeliveryService
 from .turns import TurnCoordinator
 from .bubbles import (Pacing, PROMPT, PROMPT_MARKER, semantic_plan, send_sequence, sha,
-                      plain_qq_text, candidate_boundaries, map_candidate_boundaries)
+                      plain_qq_text, candidate_boundaries, map_candidate_boundaries,
+                      trim_boundary_newlines)
 
 from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, MessageChain, filter
@@ -231,7 +232,10 @@ class Phase1Guard(Star):
                         allow_fallback=((not event.get_extra('phase3_semantic_classified')
                                          or event.get_extra('phase3_casual_split_candidate'))
                                         and self.casual_fallback_allowed(event)),format_for_send=True)
+                trimmed_newlines=0
+                if kind!='progress':parts,trimmed_newlines=self.trim_bubble_edges(parts)
                 self.trace(event,'cleaned_final',{'parts':len(parts),
+                    'boundary_newlines_removed':trimmed_newlines,
                     'chars':sum(len(p.get_plain_text()) for p in parts),
                     'sha256':sha('\n'.join(p.get_plain_text() for p in parts))})
                 async def send_part(index,delivery_id):
@@ -699,6 +703,7 @@ class Phase1Guard(Star):
             # V3.1 accepts only plain unstructured prose. Formatting it again
             # would strip edge whitespace or sentence punctuation, so send its
             # exact slices after all native safety hooks have had their say.
+            # Only final display-edge CR/LF cleanup follows, before ledgering.
             parts=[result.derive([Plain(part)]) for part in plan.texts]
         else:
             parts=[result.derive([Plain(part)]) for part in plan.texts]
@@ -708,6 +713,19 @@ class Phase1Guard(Star):
             event.set_extra('phase3_segment_plan',diagnostic)
             self.trace(event,'cleaned_final',{'segment_plan':diagnostic})
         return parts
+
+    @staticmethod
+    def trim_bubble_edges(parts):
+        """Finalize display text once, before ledger/transport/history agree on it."""
+        cleaned=[];removed=0
+        for part in parts:
+            if len(part.chain)==1 and isinstance(part.chain[0],Plain):
+                raw=part.chain[0].text
+                text=trim_boundary_newlines(raw)
+                removed+=len(raw)-len(text)
+                if text!=raw:part=part.derive([Plain(text)])
+            cleaned.append(part)
+        return cleaned,removed
 
     def qq_plain_chain(self,result):
         if not self.plain_text_enabled or not all(isinstance(p,Plain) for p in result.chain):return result
@@ -767,6 +785,7 @@ class Phase1Guard(Star):
             self.store.create_turn(turn_id,self.phase3_platform_id,umo,proactive=True)
         from astrbot.api.event import MessageEventResult
         parts=self.semantic_parts(MessageEventResult().message(text),format_for_send=True)
+        parts,_=self.trim_bubble_edges(parts)
         def last_input():
             return self.store.db.execute('SELECT max(rowid) FROM inbound WHERE platform=? AND session=?',
                 (self.phase3_platform_id,umo)).fetchone()[0]

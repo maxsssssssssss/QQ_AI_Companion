@@ -1,5 +1,7 @@
 # Phase 3 发布与回滚操作说明
 
+2026-10-25 14:04 +08:00已授权发布[气泡边界换行修复](phase3-bubble-boundary-validation.md)：只替换Guard `bubbles.py/main.py`，一致性备份及14个SQLite隔离恢复检查通过后，仅重启AstrBot一次。QQ在线、OneBot重连、启动策略及源码核验PASS；NapCat、配置、原聊天/记忆及主动额度保持。发布包`phase3-20261025-bubble-boundary-r1`中的两文件源回滚入口和快照位置见专项报告。
+
 2026-10-24后续窄修复：[主动空计划恢复](phase3-proactive-plan-recovery.md)。新控制器`phase3-deploy-proactive-recovery.py`锁定现有50份第一方源码、完整配置及固定上游，只替换Runtime的`proactive.py`；停写备份/隔离恢复后仅启动原AstrBot容器，NapCat保持运行。回滚只还原该源码，保留新聊天和记忆，完整命令与结果见专项报告。
 
 ## 2026-10-24 清洁开始与统一r4正式安装

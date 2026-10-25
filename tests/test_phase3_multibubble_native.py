@@ -1,6 +1,8 @@
 """Pinned AstrBot events, parser and real local OneBot HTTP; synthetic content."""
 import asyncio
+import hashlib
 import importlib
+import json
 from pathlib import Path
 import sqlite3
 import sys
@@ -456,3 +458,94 @@ class NativeBubbleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result['sent_count'],3)
         self.assertEqual(result['delivered_text'],'\n'.join(outgoing))
         self.assertEqual(self.history_text(history),'\n'.join(bodies))
+
+    def assert_final_bodies_match(self,turn_id,kind,expected,calls):
+        actual=[row[1]['message'][0]['data']['text'] for row in calls]
+        self.assertEqual(actual,expected)
+        result=self.guard.store.bubble_result(turn_id,kind)
+        rows=[self.guard.store.get_delivery(part['delivery_id']) for part in result['parts']]
+        self.assertEqual([row['text'] for row in rows],expected)
+        self.assertEqual([json.loads(row['chain_json']) for row in rows],
+                         [[Plain(body).toDict()] for body in expected])
+        planned=self.guard.store.db.execute(
+            'SELECT content_sha256,chars FROM bubble_parts WHERE turn_id=? AND kind=? ORDER BY part_index',(turn_id,kind)).fetchall()
+        self.assertEqual([(row['content_sha256'],row['chars']) for row in planned],
+                         [(hashlib.sha256(body.encode()).hexdigest(),len(body)) for body in expected])
+        self.assertEqual(result['delivered_text'],'\n'.join(expected))
+        self.assertEqual([row['state'] for row in rows],['sent']*len(expected))
+
+    async def test_v31_newline_edges_trim_after_exact_mapping_before_http_ledger_and_history(self):
+        raw='今天可算忙完了！\n\n今晚可以安心歇一会儿了。'
+        event,history=await self.v3_prepared(raw)
+        self.guard.plain_text_enabled=True
+        # The fixed native cleanup only removes the final Chinese period.
+        event.set_result(MessageEventResult().message(raw[:-1]))
+        await self.guard.preserve_semantic_boundaries(event)
+        self.assertEqual(len(event.get_result().chain),1)
+        await self.guard.dispatch_text(event)
+        expected=['今天可算忙完了！','今晚可以安心歇一会儿了']
+        self.assert_final_bodies_match(event.get_extra('phase3_turn_id'),'normal',expected,self.calls)
+        self.assertEqual(self.history_text(history),'\n'.join(expected))
+        self.assertEqual(event.get_extra('phase3_segment_plan')['reason'],'candidate_terminal_period_removed')
+
+    async def test_preserved_marker_plan_trims_late_edge_newlines_without_changing_internal_format(self):
+        raw='第一条\n内部第二行\n'+MARKER+'\n另一条完整正文'
+        event,history=await self.v3_prepared(raw)
+        self.guard.plain_text_enabled=False
+        await self.guard.preserve_semantic_boundaries(event)
+        self.assertTrue(event.get_extra('phase3_semantic_boundaries'))
+        # Late native hooks may leave cosmetic whitespace around surviving parts.
+        for part in event.get_result().chain:part.text='\r\n'+part.text+'\n\n'
+        await self.guard.dispatch_text(event)
+        expected=['第一条\n内部第二行','另一条完整正文']
+        self.assert_final_bodies_match(event.get_extra('phase3_turn_id'),'normal',expected,self.calls)
+        self.assertEqual(self.history_text(history),'\n'.join(expected))
+
+    async def test_proactive_fallback_crlf_edges_share_cleaned_plan_without_replay(self):
+        await self.proactive_setup();self.guard.casual_split_fallback_enabled=True
+        raw='今天可算忙完了！🙂 \r\n \r\n今晚可以安心歇一会儿了。\r\n'
+        expected=['今天可算忙完了！🙂  ','今晚可以安心歇一会儿了。']
+        result=await self.guard.send_proactive('test:FriendMessage:10001',raw,delivery_id='newline-candidate')
+        turn_id=self.guard.store.get_delivery(result['delivery_id'])['turn_id']
+        self.assert_final_bodies_match(turn_id,'proactive',expected,self.calls)
+        again=await self.guard.send_proactive('test:FriendMessage:10001',raw,delivery_id='newline-candidate')
+        self.assertEqual(again,result);self.assertEqual(len(self.calls),2)
+
+    async def test_edge_cleanup_keeps_internal_code_and_mixed_components_untouched(self):
+        code='```python\n    x = 1\n\n    print(x)\n```'
+        result=MessageEventResult().message('\n'+code+'\r\n')
+        parts,removed=self.guard.trim_bubble_edges([result])
+        self.assertEqual(parts[0].get_plain_text(),code);self.assertEqual(removed,3)
+        mixed=MessageEventResult(chain=[Plain('\n正文\n'),Face(id=1)])
+        parts,removed=self.guard.trim_bubble_edges([mixed])
+        self.assertIs(parts[0],mixed);self.assertEqual(removed,0)
+
+    async def test_progress_retains_existing_single_path_and_no_false_cleanup_count(self):
+        text='\n去核对一下\n'
+        event,_=await self.v3_prepared(text,kind='progress')
+        self.guard.plain_text_enabled=False
+        await self.guard.preserve_semantic_boundaries(event);await self.guard.dispatch_text(event)
+        self.assertEqual([row[1]['message'][0]['data']['text'] for row in self.calls],[text])
+        row=self.guard.store.get_turn(event.get_extra('phase3_turn_id'))
+        self.assertEqual(json.loads(row['diagnostics_json'])['cleaned_final']['boundary_newlines_removed'],0)
+        self.assertEqual(self.guard.store.phase3_snapshot()['deliveries'][0]['text'],text)
+
+    async def test_trimmed_fallback_failure_and_restart_preserve_only_confirmed_prefix(self):
+        raw='今天可算忙完了！\n今晚可以安心歇一会儿了。\n明天的事就留给明天吧。'
+        event,history=await self.v3_prepared(raw)
+        async def after(payload):self.mode='reject'
+        self.guard.register_delivery_observer(after)
+        await self.guard.preserve_semantic_boundaries(event);await self.guard.dispatch_text(event)
+        tid=event.get_extra('phase3_turn_id')
+        result=self.guard.store.bubble_result(tid,'normal')
+        self.assertEqual([part['state'] for part in result['parts']],['sent','failed','cancelled'])
+        self.assertEqual(result['delivered_text'],'今天可算忙完了！')
+        self.assertEqual([row[1]['message'][0]['data']['text'] for row in self.calls],
+                         ['今天可算忙完了！','今晚可以安心歇一会儿了。'])
+        self.assertTrue(self.history_text(history).startswith('今天可算忙完了！\n'))
+        self.assertNotIn('今晚可以安心歇一会儿了',self.history_text(history))
+        await self.guard.terminate()
+        self.guard=base.Phase1Guard(self.context,{'phase3_enabled':True,'phase3_admin_id':'10001',
+            'phase3_platform_id':'test','phase3_group_window':.01,'phase3_group_max_wait':.03})
+        self.assertEqual(self.guard.store.bubble_result(tid,'normal'),result)
+        self.assertEqual(len(self.calls),2)

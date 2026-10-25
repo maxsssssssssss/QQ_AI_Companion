@@ -12,7 +12,7 @@ import unittest
 from unittest.mock import patch
 
 from integrations.phase1_guard.bubbles import (MARKER, PROMPT, Pacing, semantic_plan, semantic_text,
-    send_sequence, plain_qq_text, candidate_boundaries, map_candidate_boundaries)
+    send_sequence, plain_qq_text, candidate_boundaries, map_candidate_boundaries, trim_boundary_newlines)
 from integrations.phase1_guard.delivery import DeliveryService, DeliveryReceipt
 from integrations.phase1_guard.store import GuardStore
 
@@ -21,6 +21,52 @@ package=types.ModuleType('bubble_pinned_private');package.__path__=[str(ROOT/'.r
 sys.modules[package.__name__]=package
 spec=importlib.util.spec_from_file_location('bubble_pinned_private.segmented_message',ROOT/'.runtime/upstream/private_companion/segmented_message.py')
 parser=importlib.util.module_from_spec(spec);sys.modules[spec.name]=parser;spec.loader.exec_module(parser)
+
+
+class BoundaryNewlineTests(unittest.TestCase):
+    def test_only_outer_cr_lf_removed_even_with_spaces_on_empty_lines(self):
+        for raw,expected in [('\r\n\n正文\r\n','正文'),
+                             ('\n  正文 \r\n \n','  正文  '),
+                             ('\r\n\t正文\t\r\n','\t正文\t'),
+                             ('\u3000\n正文\n\u00a0\r\n\u3000','\u3000正文\u00a0\u3000'),
+                             ('\n🙂 正文 👩🏽‍💻\n','🙂 正文 👩🏽‍💻')]:
+            with self.subTest(raw=repr(raw)):
+                self.assertEqual(trim_boundary_newlines(raw),expected)
+                self.assertEqual(trim_boundary_newlines(expected),expected)
+
+    def test_internal_code_paragraphs_crlf_and_horizontal_spacing_are_unchanged(self):
+        for body in ['  普通正文  ','正文\n\n后续段落','正文\r\n第二行',
+                     '```python\n    x = 1\n\n    print(x)\n```',
+                     '| A | B |\n| - | - |\n| 1 | 2 |',
+                     '> 引用\n> 下一行\n\n正文 🙂']:
+            with self.subTest(body=body):
+                self.assertEqual(trim_boundary_newlines(body),body)
+                self.assertEqual(trim_boundary_newlines('\r\n'+body+'\r\n\n'),body)
+
+    def test_empty_or_whitespace_only_keeps_existing_empty_delivery_handling(self):
+        for raw in ('','\r\n',' \n \t\r\n'):
+            self.assertEqual(trim_boundary_newlines(raw),raw)
+
+    def test_fallback_candidate_join_remains_exact_before_display_cleanup(self):
+        sentences=('今天可算忙完了！','今晚可以安心歇一会儿了。',
+                   '明天的事就留给明天吧。','这会儿只想陪你随便聊聊。')
+        for count in (2,3,4):
+            raw='\n\n'.join(sentences[:count])+'\r\n'
+            with self.subTest(count=count):
+                plan=semantic_plan(parser,raw,fallback_enabled=True)
+                self.assertEqual(plan.source,'smalltalk_fallback')
+                self.assertEqual(''.join(plan.texts),raw)
+                self.assertEqual(map_candidate_boundaries(candidate_boundaries(raw),raw),plan.texts)
+                sent=tuple(trim_boundary_newlines(part) for part in plan.texts)
+                self.assertEqual(len(sent),len(plan.texts))
+                self.assertEqual(sent,sentences[:count])
+
+    def test_model_markers_already_clean_and_bubble_count_stays_the_same(self):
+        raw='\r\n今天可算忙完了！\r\n\r\n'+MARKER+'\r\n今晚可以安心歇一会儿了。\r\n'
+        plan=semantic_plan(parser,raw,fallback_enabled=True)
+        self.assertEqual(plan.source,'model_markers')
+        self.assertEqual(tuple(trim_boundary_newlines(part) for part in plan.texts),plan.texts)
+        self.assertEqual(len(plan.texts),2)
 
 
 class PlainQQTests(unittest.TestCase):

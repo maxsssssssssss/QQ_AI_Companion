@@ -57,6 +57,22 @@ PROMPT=(PROMPT_MARKER+"""
 def sha(text):return hashlib.sha256(text.encode()).hexdigest()
 
 
+def trim_boundary_newlines(text):
+    """Drop CR/LF only within a bubble's whitespace-only outer edges.
+
+    Run after native cleanup and segmentation, before planning a delivery.
+    Internal line breaks (including code), horizontal spacing and emoji stay
+    byte-for-byte unchanged. This is display cleanup, not another splitter;
+    candidate slicing must still pass its original exact-join validation.
+    """
+    if not isinstance(text,str) or not text.strip():return text
+    leading=len(text)-len(text.lstrip())
+    trailing=len(text.rstrip())
+    return (text[:leading].replace('\r','').replace('\n','')
+            +text[leading:trailing]
+            +text[trailing:].replace('\r','').replace('\n',''))
+
+
 def plain_qq_text(text,*,enabled=True):
     """Bounded cosmetic Markdown removal, with no renderer, I/O or model call.
 
