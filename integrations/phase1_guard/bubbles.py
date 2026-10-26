@@ -167,126 +167,95 @@ def _effective_characters(text):
                for char in _EMOJI_CLUSTER.sub('',text))
 
 
-def _smalltalk_parts(text):
-    """Return exact slices of 2–4 complete, short, unstructured sentences.
+def fallback_structure_protected(text):
+    """Protect actual formatting/syntax, not a topic or technical vocabulary.
 
-    The 100-character ceiling uses Python Unicode code points, including all
-    spaces and emoji components. It rejects, never truncates or selects a cut.
-    Sentence endings alone select boundaries; no opening-word cue is needed.
-    Sentences with fewer than six letters/numbers merge forward, with any last
-    short remainder attached backward. No I/O or additional model is involved.
+    Also used read-only before native cleanup: removing code fences later must
+    not make their contents eligible as casual prose. Quotation/parenthesis
+    balance is checked separately on the final body, never on a saved raw body.
     """
-    if not text.strip() or len(text)>100:return None
-    if re.search(r'''[\x00-\x08\x0b\x0c\x0e-\x1f`~*_|<>\[\]{}\\#"'“”‘’「」『』：:①②③④⑤⑥⑦⑧⑨⑩]''',text):return None
-    if re.search(r'https?://|www\.|mailto:|\b[A-Za-z0-9-]+\.[A-Za-z]{2,}\b',text,re.I):return None
-    if re.search(r'(?:^|\s)(?:[-*+•]|\d+[.)、])\s*|=>|==|:=|\b\w+\([^)]*\)',text):return None
-    if re.search(r'首先|其次|最后|例如|具体来说|步骤|原理|概念|命令|参数|配置|接口|事务|数据库|函数|代码|'
-                 r'向量|矩阵|公式|算法|复杂度|内存|线程|进程|协议|编译|部署|'
-                 r'\b(?:SQL|API|HTTP|HTTPS|SDK|JSON|XML|TCP|UDP|CPU|GPU|token|return|class|def|function)\b',text,re.I):return None
-    sentences=[];start=0
-    while start<len(text):
-        ending=re.search(r'[。！？!?]+',text[start:])
-        if ending is None:return None  # An unfinished tail is not a sentence.
-        end=start+ending.end()
-        # Adjacent punctuation is one ending. Trailing spaces/emoji, including
-        # ZWJ, flags and keycaps, remain with that sentence without rewriting.
-        while end<len(text):
-            if text[end] in '。！？!?' or text[end].isspace():
-                end+=1;continue
-            emoji=_EMOJI_CLUSTER.match(text,end)
-            if emoji:
-                end=emoji.end();continue
-            break
-        sentences.append(text[start:end]);start=end
-        if len(sentences)>4:return None
-    if not 2<=len(sentences)<=4:return None
+    if not isinstance(text,str):return True
+    if re.search(r'[\x00-\x08\x0b\x0c\x0e-\x1f`~*_|<>\[\]{}\\#①②③④⑤⑥⑦⑧⑨⑩]',text):return True
+    if re.search(r'https?://|www\.|mailto:|\b[A-Za-z0-9-]+\.[A-Za-z]{2,}\b',text,re.I):return True
+    if re.search(r'(?:^|\s|[。！？!?：:])(?:[-*+•]|\d+[.．)）、]|[一二三四五六七八九十]+[、．])\s*|=>|==|:=',text):return True
+    # Syntax-shaped code, not words such as API, bug, 配置 or 数据库.
+    if re.search(r'(?m)^\s*(?:def\s+\w+\s*\(|class\s+\w+\s*[:(]|(?:const|let|var)\s+\w+\s*=)|'
+                 r'\b[A-Za-z_]\w*\s*=\s*[^=]|\b[A-Za-z_]\w*\(\s*(?:["\']|\d)',text):return True
+    if re.search(r'(?m)^\s*[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*\([^\n()]*\)\s*;?\s*$',text):return True
+    return False
+
+
+_QUOTE_PAIRS={'“':'”','‘':'’','「':'」','『':'』','"':'"',"'":"'",'(' : ')','（':'）','【':'】'}
+_SENTENCE_ENDINGS='。！？!?'
+
+
+def _outside_sentence_ends(text):
+    """Return outside-pair end offsets, or None for ambiguous inline pairs.
+
+    A bounded stack protects punctuation within balanced quotes/parentheses.
+    Apostrophes inside words are literals. Unbalanced/multiline quoted material
+    stays intact; neither newlines nor commas become guessed sentence endings.
+    """
+    stack=[];ends=[];i=0
+    closing=set(_QUOTE_PAIRS.values())
+    while i<len(text):
+        char=text[i]
+        if char in "'’" and i>0 and i+1<len(text) and text[i-1].isascii() and text[i-1].isalnum() and text[i+1].isascii() and text[i+1].isalnum():
+            i+=1;continue
+        if char in '\r\n' and stack:return None
+        if stack and char==stack[-1]:
+            stack.pop();i+=1;continue
+        if char in _QUOTE_PAIRS:
+            stack.append(_QUOTE_PAIRS[char]);i+=1;continue
+        if char in closing:return None
+        if not stack and char in _SENTENCE_ENDINGS:
+            end=i+1
+            while end<len(text):
+                if text[end] in _SENTENCE_ENDINGS or text[end].isspace():
+                    end+=1;continue
+                emoji=_EMOJI_CLUSTER.match(text,end)
+                if emoji:
+                    end=emoji.end();continue
+                break
+            ends.append(end);i=end;continue
+        i+=1
+    return None if stack else ends
+
+
+def _merge_adjacent(parts,*,separator=''):
+    """Only fallback slices share existing separators; native model parts do not."""
+    parts=list(parts)
+    while len(parts)>4:
+        index=min(range(len(parts)-1),key=lambda i:len(parts[i])+len(parts[i+1]))
+        parts[index:index+2]=[parts[index]+separator+parts[index+1]]
+    return tuple(parts)
+
+
+def _smalltalk_parts(text):
+    """V4: exact final-text slices at natural outside-pair sentence endings.
+
+    Up to 160 Unicode code points, including spaces/emoji. Short reactions and
+    an unpunctuated final sentence are allowed. More than four pieces merge the
+    shortest adjacent pair (leftmost tie) until bounded, never truncate/rewrite.
+    """
+    if not isinstance(text,str) or not text.strip() or len(text)>160:return None
+    if fallback_structure_protected(text):return None
+    ends=_outside_sentence_ends(text)
+    if not ends:return None
+    if ends[-1]<len(text):ends.append(len(text))
+    pieces=[text[start:end] for start,end in zip([0]+ends,ends)]
     parts=[];pending=''
-    for sentence in sentences:
-        pending+=sentence
-        if _effective_characters(pending)>=6:
+    for piece in pieces:
+        pending+=piece
+        # No minimum word/Han count: 哈？ is a valid reaction. Avoid an empty
+        # or punctuation-only bubble, attaching such prefixes/tails instead.
+        if _effective_characters(pending):
             parts.append(pending);pending=''
     if pending:
         if not parts:return None
         parts[-1]+=pending
-    return tuple(parts) if 2<=len(parts)<=4 else None
-
-
-@dataclass(frozen=True,slots=True)
-class BubbleCandidate:
-    """Only identity and boundary metadata survives the early response hook."""
-    raw_sha256:str
-    raw_length:int
-    raw_end_offsets:tuple[int,...]
-    terminal_period_removed_sha256:str|None=None
-    terminal_period_removed_length:int|None=None
-    terminal_period_removed_end_offsets:tuple[int,...]|None=None
-
-
-def candidate_boundaries(text):
-    """Record eligible raw boundaries without retaining the generated body.
-
-    Only the pinned native cleanup's terminal Chinese-period removal is mapped.
-    Other formatting/cleanup changes must keep the final answer in one bubble.
-    """
-    try:
-        if not isinstance(text,str) or _reserved_marker_present(text):return None
-        parts=_smalltalk_parts(text)
-        if not parts or ''.join(parts)!=text:return None
-        offsets=[];end=0
-        for part in parts:
-            end+=len(part);offsets.append(end)
-        offsets=tuple(offsets)
-        candidate=BubbleCandidate(sha(text),len(text),offsets)
-        removed=re.search(r'。+(?=\s*$)',text)
-        if removed is None or removed.start()<offsets[-2]:return candidate
-        final=text[:removed.start()]+text[removed.end():]
-        mapped=offsets[:-1]+(len(final),)
-        return BubbleCandidate(candidate.raw_sha256,candidate.raw_length,offsets,
-                               sha(final),len(final),mapped)
-    except Exception:
-        return None
-
-
-def _valid_candidate_offsets(offsets,length):
-    return (type(length) is int and 1<=length<=100 and type(offsets) is tuple
-            and 2<=len(offsets)<=4 and all(type(end) is int for end in offsets)
-            and all(start<end for start,end in zip((0,)+offsets,offsets))
-            and offsets[-1]==length)
-
-
-def map_candidate_boundaries(candidate,final_text):
-    """Slice only the unchanged or narrowly mapped final body; never restore.
-
-    Eligibility is not evaluated again after downstream hooks. A mismatch,
-    missing body or malformed metadata returns None for a normal single send.
-    """
-    try:
-        if type(candidate) is not BubbleCandidate or not isinstance(final_text,str):return None
-        if not final_text.strip() or not 1<=len(final_text)<=100:return None
-        if (not isinstance(candidate.raw_sha256,str)
-                or not re.fullmatch(r'[0-9a-f]{64}',candidate.raw_sha256)
-                or not _valid_candidate_offsets(candidate.raw_end_offsets,candidate.raw_length)):
-            return None
-        variant=(candidate.terminal_period_removed_sha256,
-                 candidate.terminal_period_removed_length,
-                 candidate.terminal_period_removed_end_offsets)
-        if not all(value is None for value in variant):
-            digest,length,offsets=variant
-            if (not isinstance(digest,str) or not re.fullmatch(r'[0-9a-f]{64}',digest)
-                    or not _valid_candidate_offsets(offsets,length)
-                    or length>=candidate.raw_length
-                    or offsets[:-1]!=candidate.raw_end_offsets[:-1]):
-                return None
-        digest=sha(final_text)
-        if len(final_text)==candidate.raw_length and digest==candidate.raw_sha256:
-            offsets=candidate.raw_end_offsets
-        elif len(final_text)==variant[1] and digest==variant[0]:
-            offsets=variant[2]
-        else:return None
-        parts=tuple(final_text[start:end] for start,end in zip((0,)+offsets,offsets))
-        return parts if 2<=len(parts)<=4 and all(part.strip() for part in parts) and ''.join(parts)==final_text else None
-    except Exception:
-        return None
+    parts=_merge_adjacent(parts)
+    return tuple(parts) if 2<=len(parts)<=4 and ''.join(parts)==text else None
 
 
 def semantic_plan(parser,text,*,enabled=True,fallback_enabled=False,allow_fallback=True):
@@ -306,12 +275,13 @@ def semantic_plan(parser,text,*,enabled=True,fallback_enabled=False,allow_fallba
         parsed=parser.parse_llm_segment_control(text)
         native_count=len(getattr(parsed,'segments',()))
         native_controlled=bool(parsed.controlled)
-        # Preserve structured answers as one message. Native parsing/cleanup
-        # still owns marker recovery, including malformed/reserved tokens.
+        # Native parsing protects fenced/quoted tokens. Valid markers outside
+        # those structures still own boundaries; structure excludes fallback only.
         structured=bool(re.search(r'^\s*(?:```|~~~|\|.*\|\s*$)',text,re.M))
-        if (enabled and not structured and native_controlled and 1<len(parsed.segments)<=4
+        if (enabled and native_controlled and 1<len(parsed.segments)
                 and all(isinstance(part,str) and part.strip() for part in parsed.segments)):
-            return plan(parsed.segments,'model_markers','native_boundaries')
+            return plan(_merge_adjacent(parsed.segments,separator='\n'),'model_markers',
+                        'native_boundaries' if len(parsed.segments)<=4 else 'native_boundaries_merged_to_four')
         cleaned=parsed.sanitized_text
         if not isinstance(cleaned,str) or (text.strip() and not cleaned.strip()):
             return plan([single_bubble_fallback(text)],'single','parser_invalid_output')
@@ -326,7 +296,7 @@ def semantic_plan(parser,text,*,enabled=True,fallback_enabled=False,allow_fallba
         if not allow_fallback:return plan([cleaned],'single','fallback_context_excluded')
         parts=_smalltalk_parts(text)
         if parts and ''.join(parts)==text:
-            return plan(parts,'smalltalk_fallback','bounded_complete_sentences')
+            return plan(parts,'smalltalk_fallback','bounded_sentence_boundaries_v4')
         return plan([text],'single','fallback_ineligible')
     except Exception:
         # Formatting is optional. A parser/API failure cannot suppress an

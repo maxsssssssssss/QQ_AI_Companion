@@ -1,5 +1,21 @@
 # Phase 3 发布与回滚操作说明
 
+2026-10-26当前版本：**V0.4人格已在12:24:27 +08:00启动生效，12:25:04核验PASS**。保留用户提供的`# QQ_COMPANION_PERSONA_V0_4`标题与完整正文；仅重启AstrBot，NapCat、聊天、记忆及其他配置保持。[发布及回滚记录](phase3-persona-v04-release.md)。以下Candidate及更早版本记录为历史。
+
+2026-10-26后续更新：用户新提供的 **V0.3 Candidate 人格已在11:53:50 +08:00启动生效，11:54:44核验PASS**。仅替换模板与加载器、重启AstrBot；NapCat、聊天、记忆及其他配置保持。正文标记为`[QQ_COMPANION_PERSONA_V0_3_CANDIDATE]`，是当前生效版本。详见[人格替换与回滚记录](phase3-persona-candidate-release.md)。以下旧版本状态保留为历史。
+
+2026-10-26后续授权发布：**V4多气泡＋V0.3人格已在00:56:15 +08:00启动生效，00:56:45核验PASS**，仅重启AstrBot，NapCat与既有数据、配置保持。详见[联合发布记录](phase3-bubbles-v4-persona-release.md)。以下保留此前本地开发/待发布时的状态与证据。
+
+2026-10-26后续：[V0.3人格](persona-integration.md)已按用户全文保存到本地，模板、渲染校验和打包清单已更新，42项相关检查通过。与V4一起保持本地待发布；本轮不同步、不部署、不重启，线上人格仍为V0.2。
+
+2026-10-26：[V4积极分气泡本地候选](phase3-multibubble-v4-validation.md)完成264项组件/原生及23项完整隔离验证；仅两个Guard运行文件变化，无配置或数据迁移。本轮明确不服务器同步、不部署、不重启，后续不能把旧待发布目录当作含V4。
+
+2026-10-25 20:14:50 +08:00：[搜索改写修复](phase3-search-relaxation.md)已按用户明确授权发布，仅替换Search四源码并重启AstrBot；14库停写备份/隔离恢复通过，配置、聊天、记忆、NapCat和主动规则保持。版本目录 `phase3-20261025-search-relaxation-r1`，恢复仅通过匹配源码回滚，不覆盖生产data。
+
+2026-10-25 18:35 +08:00：[主动参数与多气泡清理联合发布](phase3-tuning-bubbles-release.md)已生效。7源、2配置指定字段和原目标日限5→8；14库停写备份/隔离恢复通过，仅重启AstrBot，QQ/OneBot已恢复。下段为此前只同步阶段的记录。
+
+2026-10-25新候选：[主动参数调整](phase3-proactive-tuning.md)只准备并同步，不修改运行目录或重启。正式生效需五份Runtime源码、两份配置指定字段及现有唯一目标日限5→8；原账本保留。不得复用硬编码旧5/5政策的历史发布控制器直接安装新候选。
+
 2026-10-25 14:04 +08:00已授权发布[气泡边界换行修复](phase3-bubble-boundary-validation.md)：只替换Guard `bubbles.py/main.py`，一致性备份及14个SQLite隔离恢复检查通过后，仅重启AstrBot一次。QQ在线、OneBot重连、启动策略及源码核验PASS；NapCat、配置、原聊天/记忆及主动额度保持。发布包`phase3-20261025-bubble-boundary-r1`中的两文件源回滚入口和快照位置见专项报告。
 
 2026-10-24后续窄修复：[主动空计划恢复](phase3-proactive-plan-recovery.md)。新控制器`phase3-deploy-proactive-recovery.py`锁定现有50份第一方源码、完整配置及固定上游，只替换Runtime的`proactive.py`；停写备份/隔离恢复后仅启动原AstrBot容器，NapCat保持运行。回滚只还原该源码，保留新聊天和记忆，完整命令与结果见专项报告。

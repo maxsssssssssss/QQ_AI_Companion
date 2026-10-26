@@ -102,6 +102,7 @@ class Phase3Runtime(Star):
                 allowed_session=f"{self.platform_id}:FriendMessage:{self.admin_id}", enabled=False,
                 **self.settings.get("proactive_window", {}))
             self.proactive_bridge = NativeProactiveBridge(private.star_cls, self.guard, self.proactive, module._ProactiveSendOutcome,
+                history_policy=self.settings.get("proactive_history"),
                 event_source=self._proactive_events, event_resolver=self._proactive_event,
                 event_delivered=self._event_prompted)
         self.prepared = True

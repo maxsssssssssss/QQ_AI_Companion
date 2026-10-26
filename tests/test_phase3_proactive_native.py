@@ -476,7 +476,7 @@ class NativeProactiveTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(cfg['private_followup_config']['min_interval_minutes'], 180)
         self.assertEqual(cfg['proactive_reach_config']['max_daily_messages'], 0)
         self.assertFalse(cfg['proactive_generation_config']['enable_llm_proactive_message'])
-        for limit in (0, 6, True):
+        for limit in (0, 9, True):
             with self.assertRaises(PermissionError):
                 authorize_native_target(self.private,self.private.user['umo'],approved=True,daily_limit=limit)
         authorize_native_target(self.private,self.private.user['umo'],approved=True,daily_limit=5)

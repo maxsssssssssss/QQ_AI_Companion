@@ -51,7 +51,7 @@
   },
   "proactive_window": {
     "type": "object",
-    "description": "Trial retains dated expiry. Continuous: mode=continuous, start/end=0, max_per_day=5, max_generations_per_day=5, cooldown=10800, quiet_hours=[0,9].",
+    "description": "Trial keeps its dated 2-attempt policy. Latest continuous candidate: max_per_day=8, max_generations_per_day=48, cooldown=7200, quiet_hours=[23,9]. Existing continuous policy remains readable for rollback.",
     "items": {
       "mode": {
         "type": "string",
@@ -80,12 +80,12 @@
           23,
           9
         ],
-        "description": "Asia/Shanghai quiet [start,end). Trial [23,9]; continuous [0,9] permits 09:00:00 through 23:59:59."
+        "description": "Asia/Shanghai quiet [start,end). Latest continuous [23,9] allows 09:00<=time<23:00; legacy continuous [0,9] remains supported."
       },
       "max_generations_per_day": {
         "type": "int",
         "default": 0,
-        "description": "Explicit daily model-evaluation budget, including defer/skip/errors. 0 only means inherit the existing trial daily limit; continuous must explicitly set 1..5 (approved: 5)."
+        "description": "Daily model-evaluation attempts including skip/defer/errors. Continuous accepts 1..48. Trial 0 inherits its existing daily limit."
       }
     }
   },
@@ -164,6 +164,20 @@
           "爱好",
           "娱乐"
         ]
+      }
+    }
+  },
+  "proactive_history": {
+    "type": "object",
+    "description": "First-party adapter for native proactive summaries; defaults preserve old behavior. Explicit new candidate uses 8 summaries and 24h ordinary retention; dedup window is unchanged.",
+    "items": {
+      "summary_limit": {
+        "type": "int",
+        "default": 4
+      },
+      "ordinary_retention_hours": {
+        "type": "int",
+        "default": 6
       }
     }
   }

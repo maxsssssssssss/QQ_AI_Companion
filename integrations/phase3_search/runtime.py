@@ -9,7 +9,7 @@ import math
 import re
 import time
 
-from .policy import FETCH, SEARCH, NO_WEB, PRIVATE_MARKERS, PublicPolicy, Rejected
+from .policy import FETCH, SEARCH, NO_WEB, PRIVATE_SOURCE_INTENT, PRIVATE_MARKERS, PublicPolicy, Rejected
 
 
 @dataclass(frozen=True)
@@ -51,20 +51,24 @@ class TurnState:
 
 class SearchRuntime:
     def __init__(self, *, guard, generate, send, policy: PublicPolicy, admin_id,
-                 platform_id, persona, enabled=False, limits=None, clock=time.monotonic, budget=None):
+                 platform_id, persona, enabled=False, limits=None, clock=time.monotonic, budget=None,
+                 protected_values=None):
         self.guard, self.generate, self.send = guard, generate, send
         self.policy, self.persona = policy, persona
         self.admin_id, self.platform_id = str(admin_id), str(platform_id)
         self.enabled, self.limits, self.clock = enabled, limits or SearchLimits(), clock
         self.turns = {}
         self.budget = budget
+        # Supplied by the plugin's configuration boundary, never tool arguments.
+        self.protected_values = protected_values
         self.metrics = {"progress_calls": 0, "search_calls": 0, "fetch_calls": 0,
                         "blocked_calls": 0, "tool_failures": 0, "progress_input_tokens": 0, "progress_output_tokens": 0}
 
     @staticmethod
     def current_input(event):
         # Guard records this before any memory injection. Never derive external
-        # query permission from req.prompt, Agent history or model-supplied args.
+        # permission or override a user's no-web instruction from model args.
+        # Public query wording may be rewritten using the Agent's real context.
         grouped = event.get_extra("phase3_grouped_text")
         return grouped if isinstance(grouped, str) else (event.message_str or "")
 
@@ -81,10 +85,39 @@ class SearchRuntime:
         if (NO_WEB.search(self.current_input(event)) or NO_WEB.search(event.message_str or "")
                 or event.get_extra("phase3_no_web")):
             raise Rejected("user_forbids_web")
+        if PRIVATE_SOURCE_INTENT.search(self.current_input(event)):
+            raise Rejected("private_source_intent")
         turn_id = event.get_extra("phase3_turn_id")
         if not isinstance(turn_id, str) or not turn_id:
             raise Rejected("missing_turn")
         return turn_id
+
+    def sensitive_values(self):
+        try:
+            values = self.protected_values() if callable(self.protected_values) else self.protected_values
+            if values is None:
+                values = ()
+            if (not isinstance(values, (tuple, list, set, frozenset))
+                    or len(values) > 512 or any(not isinstance(v, str) for v in values)):
+                raise ValueError()
+            return tuple(v for v in (*values, self.admin_id) if v)
+        except Exception:
+            raise Rejected("sensitive_values_unavailable") from None
+
+    def rejected(self, event, reason):
+        """Existing turn trace: reason codes only, never rejected query or URL."""
+        self.metrics["blocked_calls"] += 1
+        trace = getattr(self.guard, "trace", None)
+        if callable(trace):
+            try:
+                trace(event, "model_request", {"search_rejected": {
+                    "reason": reason, "external_request_sent": False}})
+            except Exception:
+                # Optional diagnostics cannot turn a rejection into a request.
+                pass
+        return ("Error: external request blocked (" + reason + "). No search or fetch request was sent. "
+                "Report this reason accurately; do not label a local policy rejection as a network outage. "
+                "Do not rephrase to evade privacy, authorization or budget restrictions.")
 
     def state(self, turn_id):
         if turn_id not in self.turns:
@@ -165,7 +198,8 @@ class SearchRuntime:
                 url = arguments.get("url")
                 if not isinstance(url, str) or url not in state.source_urls | explicit_urls:
                     raise Rejected("fetch_url_has_no_public_source")
-            sanitized = await self.policy.arguments(native.name, arguments, source_text=source_text)
+            sanitized = await self.policy.arguments(native.name, arguments, source_text=source_text,
+                                                    protected_values=self.sensitive_values())
             async with state.lock:
                 self.authorized(event, key_ready=ready())
                 if self.clock()-state.started >= self.limits.turn_timeout or state.calls >= self.limits.max_calls:
@@ -224,8 +258,6 @@ class SearchRuntime:
                 state.results[signature] = wrapped
                 return wrapped
         except Rejected as exc:
-            self.metrics["blocked_calls"] += 1
-            return "Error: external request blocked ("+str(exc)+"). No search or fetch request was sent."
+            return self.rejected(event, str(exc))
         except (TimeoutError, OSError):
-            self.metrics["blocked_calls"] += 1
-            return "Error: external request blocked (address_validation_unavailable). No search or fetch request was sent."
+            return self.rejected(event, "address_validation_unavailable")

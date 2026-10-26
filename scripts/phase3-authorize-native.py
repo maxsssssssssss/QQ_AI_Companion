@@ -5,7 +5,7 @@ Default prepares a private backup and isolated candidate only. --apply requires
 --approved-target-migration. No service is stopped/started, no QQ process or model
 is launched, and no native global configuration is enabled. The existing image
 runs one networkless Python worker against a copy, using pinned native APIs.
---daily-limit accepts 1 through 5; the default of 2 preserves trial preparation.
+--daily-limit accepts 1 through 8; the default of 2 preserves trial preparation.
 """
 from __future__ import annotations
 
@@ -133,7 +133,7 @@ def native_modules(source):
 
 
 def check_daily_limit(daily_limit):
-    if type(daily_limit) is not int or not 1 <= daily_limit <= 5:
+    if type(daily_limit) is not int or not 1 <= daily_limit <= 8:
         raise MigrationError('invalid_daily_limit')
 
 
@@ -385,7 +385,7 @@ def main():
     parser.add_argument('--deployment',type=Path,default=Path('/opt/qq-ai-companion/deployment'))
     parser.add_argument('--backup-dir',type=Path)
     parser.add_argument('--approved-target-migration',action='store_true')
-    parser.add_argument('--daily-limit',type=int,choices=range(1,6),default=2,
+    parser.add_argument('--daily-limit',type=int,choices=range(1,9),default=2,
         help='Per-target daily limit in the isolated candidate (default: 2).')
     parser.add_argument('--apply',action='store_true')
     parser.add_argument('--rollback',action='store_true',help='Restore an APPLIED backup only if the current file still matches its exact candidate hash.')

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Offline V3/V3.1 planning audit of fixed, previously paid synthetic replies.
+"""Offline versioned planning audit of fixed, previously paid synthetic replies.
 
 Reads only an explicit hash-verified evidence allowlist, never private QQ
 history, profiles or credentials. Makes no API request and sends no messages.
@@ -20,6 +20,8 @@ import types
 
 ROOT = Path(__file__).resolve().parents[1]
 BASELINE_SHA256 = 'aa639a1970640502086abcdba6ef3729a87d6f8904d2bd995a07563d6f536799'
+V31_BASELINE_SHA256 = 'ef629bcd15a9844771425ae785e528cfd88e3d60774f7b6980bbd1ffc720abd8'
+V31_BASELINE_RELATIVE = 'evidence/phase3/multibubble-v4-20261026/v31-baseline-bubbles.py'
 PARSER_SHA256 = 'ae7c25bbe39198fb49029a9c967e98a37156622922349d826aeb815002453176'
 HELPERS_SHA256 = '586ced4b28d6bae9c0ef0109e6ce71a954798ee19f2eb59aa8aa1ee912930a48'
 TAG_REGISTRY_SHA256 = '9b001e3142c751badcc8a24f25debb909a770aeb5333e99b50f5d011e0d60104'
@@ -184,9 +186,11 @@ def plan_record(module, parser, text, *, allow_fallback, final_cleanup=None):
             mapped = module.map_candidate_boundaries(candidate, cleaned)
             if mapped and ''.join(mapped) == cleaned:
                 final_parts = list(mapped)
-                mapping = 'EXACT' if cleaned == text else 'TERMINAL_PERIOD_REMOVED'
-                diagnostics.update(source='smalltalk_fallback', planned_count=len(final_parts),
-                    reason='candidate_exact' if cleaned == text else 'candidate_terminal_period_removed')
+                reason = module.candidate_mapping_reason(candidate, cleaned)
+                if not isinstance(reason, str) or not reason.startswith('candidate_'):
+                    raise ValueError('candidate_mapping_reason_required')
+                mapping = reason.removeprefix('candidate_').upper()
+                diagnostics.update(source='smalltalk_fallback', planned_count=len(final_parts), reason=reason)
             else:
                 mapping = 'REJECTED' if candidate is not None else 'MISSING'
                 diagnostics['reason'] = 'fallback_cleaned_mismatch' if candidate is not None else 'fallback_missing_candidate'
@@ -247,6 +251,76 @@ def compare_records(records, baseline, candidate, parser, *, final_cleanup):
     return rows
 
 
+def final_text_plan_record(module, parser, text, *, allow_fallback, final_cleanup):
+    """V4 classifies the final allowed text, without restoring a raw candidate.
+
+    This offline adapter uses the locked native terminal-period helper only.
+    Full native response hooks and delivery/history are tested by the native
+    integration suite; this report makes no QQ delivery or naturalness claim.
+    """
+    raw_plan = module.semantic_plan(parser, text, enabled=True, fallback_enabled=True,
+                                    allow_fallback=allow_fallback)
+    cleaned = final_cleanup(text)
+    if not isinstance(cleaned, str): raise ValueError('native_cleanup_string_required')
+    plan = module.semantic_plan(parser, cleaned, enabled=True, fallback_enabled=True,
+                               allow_fallback=allow_fallback)
+    final_parts = list(plan.texts)
+    selected = plan.source == 'smalltalk_fallback'
+    parts = final_parts if selected else [module.plain_qq_text(p) for p in final_parts]
+    exact = ''.join(parts) == cleaned if selected else None
+    integrity = ('EXACT_FINAL_SLICES' if exact else 'FAIL_FALLBACK_CHANGED_CONTENT') if selected else (
+        'NATIVE_CONTROL_CLEANUP' if plan.raw_marker_present else 'SINGLE_NATIVE_FORMATTING')
+    return {'raw_plan': raw_plan.diagnostics(), 'final_plan': plan.diagnostics(),
+        'fallback_eligible': selected, 'fallback_selected': selected, 'split': len(parts) > 1,
+        'raw': text, 'full_cleaned': cleaned, 'raw_parts': list(raw_plan.texts),
+        'final_parts': final_parts, 'formatted_parts': parts,
+        'raw_join_equals_input': ''.join(raw_plan.texts) == text,
+        'final_join_equals_cleaned': ''.join(final_parts) == cleaned,
+        'formatted_join_equals_cleaned': ''.join(parts) == cleaned,
+        'fallback_exact_after_formatting': exact,
+        'candidate_mapping': 'NOT_USED_FINAL_ALLOWED_TEXT', 'integrity': integrity,
+        'formatting_scope': 'pinned native terminal-period helper then final-text V4 planning; '
+            'fallback exact final slices bypass plain_qq_text; other native hooks/transport/history not replayed'}
+
+
+def with_display_edges(record, module):
+    """Expose display-edge normalization separately from exact segmentation."""
+    parts = record['formatted_parts']
+    visible = [module.trim_boundary_newlines(part) for part in parts]
+    # Independently constrain allowed changes to CR/LF at whitespace-only
+    # edges. No inner newline, space, punctuation or emoji may disappear.
+    valid = True
+    for before, after in zip(parts, visible):
+        if not before.strip():
+            valid &= before == after
+            continue
+        start, end = len(before) - len(before.lstrip()), len(before.rstrip())
+        expected = ''.join(c for c in before[:start] if c not in '\r\n') + before[start:end]
+        expected += ''.join(c for c in before[end:] if c not in '\r\n')
+        valid &= expected == after
+    return dict(record, display_parts=visible,
+        boundary_newlines_removed=sum(map(len, parts)) - sum(map(len, visible)),
+        display_boundary_only=bool(valid), display_join_equals_cleaned=''.join(visible) == record['full_cleaned'])
+
+
+def compare_v31_v4_records(records, baseline, candidate, parser, *, final_cleanup):
+    rows = []
+    for original in records:
+        row = dict(original)
+        row['v31'] = with_display_edges(plan_record(baseline, parser, row['output'],
+            allow_fallback=row['allow_fallback'], final_cleanup=final_cleanup), baseline)
+        row['v4'] = with_display_edges(final_text_plan_record(candidate, parser, row['output'],
+            allow_fallback=row['allow_fallback'], final_cleanup=final_cleanup), candidate)
+        row['plan_changed'] = row['v31']['display_parts'] != row['v4']['display_parts']
+        row['short_unmarked_nonsearch'] = bool(row['allow_fallback']
+            and not row['v4']['final_plan'].get('raw_marker_present')
+            and 0 < len(row['v4']['full_cleaned']) <= 160)
+        row['codex_rule_review'] = {'status': 'PENDING_PER_SAMPLE_REVIEW', 'verdict': None, 'reason': None}
+        row['owner_naturalness'] = 'PENDING_OWNER_EVALUATION'
+        rows.append(row)
+    return rows
+
+
 def fenced(text):
     width = max([2] + [len(match.group(0)) for match in re.finditer(r'`+', text)]) + 1
     fence = '`' * width
@@ -254,6 +328,7 @@ def fenced(text):
 
 
 def markdown(report):
+    if report.get('comparison') == 'v31-v4': return markdown_v4(report)
     lines = ['# V3 / V3.1 历史合成回复离线审查', '',
         '只重放既有真实 DeepSeek API 合成回复的解析与计划，不产生新模型请求、QQ发送或生产写入。',
         'Thinking 实验没有 Guard 分段提示词；它们可检验兜底对既有正文的行为，不能衡量线上分段提示效果。',
@@ -286,6 +361,39 @@ def markdown(report):
     return '\n'.join(lines) + '\n'
 
 
+def markdown_v4(report):
+    lines = ['# V3.1 / V4 真实 DeepSeek 历史回复离线对比', '',
+        '固定 42 条既有真实 API 合成回复；没有新增模型调用、QQ 消息或生产写入，没有读取私人聊天或资料。',
+        'V3.1 使用发布前冻结的源码和原始候选映射；V4 使用当前源码，对固定 Private 6.7.0 末尾句号清理 helper 的输出直接规划。',
+        '这不是完整原生 hook 或 QQ 重放；完整发送、历史与取消由隔离联调覆盖。Thinking High/Low 的旧正文只用于算法回放，不改变线上 Off。',
+        '先验证切片拼接与清理后正文逐字符一致，再独立记录发送前仅边界 CR/LF 删除；内部换行、水平空格、Emoji 不应被改变。',
+        '覆盖率不等于自然度。未生成 LLM 自评分，用户体验待本人评价。', '',
+        '| 样本 | 清理后字符 | V3.1 泡数 | V4 泡数 | V4 路径 | 切片完整性 | 边界换行删除数 |',
+        '|---|---:|---:|---:|---|---|---:|']
+    for row in report['samples']:
+        old, new = row['v31'], row['v4']
+        lines.append(f"| {row['id']} | {len(new['full_cleaned'])} | {len(old['display_parts'])} | "
+            f"{len(new['display_parts'])} | {new['final_plan']['source']} | {new['integrity']} | "
+            f"{new['boundary_newlines_removed']} |")
+    for row in report['samples']:
+        lines.extend(['', '## ' + row['id'], '',
+            f"来源：`{row['source']}`；场景：`{row['case']}`；原实验 Thinking：`{row['thinking']}`。"])
+        if row['user'] is not None: lines.extend(['', '合成用户原文：', '', fenced(row['user'])])
+        lines.extend(['', '模型完整最终正文：', '', fenced(row['output']), '',
+            '固定原生 helper 清理后完整正文：', '', fenced(row['v4']['full_cleaned'])])
+        for label, key in (('V3.1', 'v31'), ('V4', 'v4')):
+            item = row[key]
+            lines.extend(['', f"{label}：`{item['final_plan']['reason']}`；规划切片拼接等于清理后正文："
+                f"`{item['final_join_equals_cleaned']}`；边界清理仅删 CR/LF：`{item['display_boundary_only']}`。"])
+            for index, part in enumerate(item['display_parts'], 1):
+                lines.extend(['', f'计划气泡 {index}：', '', fenced(part), '',
+                    '精确字符表示：`' + json.dumps(part, ensure_ascii=False).replace('`', '\\u0060') + '`'])
+        review = row['codex_rule_review']
+        lines.extend(['', f"规则审阅：{review['status']}；{review.get('verdict') or '待逐例核对'}；"
+            f"{review.get('reason') or '不以多泡比例代替误切审阅'}。", '', '自然度：待用户评价。'])
+    return '\n'.join(lines) + '\n'
+
+
 def save_report(output, report):
     output = output.absolute(); no_links(output)
     if output.exists(): raise FileExistsError('new_audit_directory_required')
@@ -309,9 +417,12 @@ def run(args):
         return {'status': 'VERIFIED_HISTORICAL_INVENTORY', 'responses': len(records), 'files': evidence,
                 'sources': dict(Counter(r['source'] for r in records)), 'new_api_calls': 0, 'new_qq_sends': 0}
     if args.output_dir is None: raise ValueError('new_output_dir_required')
+    if getattr(args, 'comparison', 'v31-v4') == 'v31-v4':
+        return run_v4(args, records, evidence)
     baseline_path = ROOT / 'evidence/phase3/multibubble-v31-20261024/v3-baseline-bubbles.py'
-    candidate_path = ROOT / 'integrations/phase1_guard/bubbles.py'
+    candidate_path = ROOT / V31_BASELINE_RELATIVE
     verified_bytes(baseline_path, BASELINE_SHA256); no_links(candidate_path)
+    verified_bytes(candidate_path, V31_BASELINE_SHA256)
     baseline = load_module('history_audit_v3_baseline', baseline_path)
     candidate = load_module('history_audit_v31_candidate', candidate_path)
     cleanup = native_terminal_cleanup()
@@ -335,10 +446,49 @@ def run(args):
                                    'changed_plans', 'fallback_integrity_failures', 'counts')}
 
 
+def run_v4(args, records, evidence):
+    baseline_path = ROOT / V31_BASELINE_RELATIVE
+    candidate_path = ROOT / 'integrations/phase1_guard/bubbles.py'
+    verified_bytes(baseline_path, V31_BASELINE_SHA256); no_links(candidate_path)
+    baseline = load_module('history_audit_v31_frozen', baseline_path)
+    candidate = load_module('history_audit_v4_candidate', candidate_path)
+    rows = compare_v31_v4_records(records, baseline, candidate, native_parser(),
+                                  final_cleanup=native_terminal_cleanup())
+    failures = sum(r[key]['integrity'] == 'FAIL_FALLBACK_CHANGED_CONTENT'
+        for r in rows for key in ('v31', 'v4'))
+    boundary_failures = sum(not r[key]['display_boundary_only']
+        for r in rows for key in ('v31', 'v4'))
+    counts = {}
+    for key in ('v31', 'v4'):
+        counts[key] = {'fallback_selected': sum(r[key]['fallback_selected'] for r in rows),
+            'split': sum(r[key]['split'] for r in rows),
+            'distribution': dict(Counter(len(r[key]['display_parts']) for r in rows)),
+            'reasons': dict(Counter(r[key]['final_plan']['reason'] for r in rows)),
+            'short_unmarked_nonsearch_denominator': sum(r['short_unmarked_nonsearch'] for r in rows),
+            'short_unmarked_nonsearch_split': sum(r['short_unmarked_nonsearch'] and r[key]['split'] for r in rows),
+            'thinking_off_fallback_selected': sum(r['thinking'] == 'off' and r[key]['fallback_selected'] for r in rows)}
+    report = {'comparison': 'v31-v4',
+        'status': 'OFFLINE_MECHANICS_COMPLETE_PENDING_REVIEW' if not failures and not boundary_failures else 'INTEGRITY_FAILURE',
+        'observed_at': datetime.now(timezone.utc).isoformat(), 'historical_real_api_responses': len(rows),
+        'new_api_calls': 0, 'new_qq_sends': 0, 'production_writes': False,
+        'private_chat_or_profile_read': False, 'reasoning_content_exported': False,
+        'source_files': evidence, 'algorithm_hashes': {'v31': V31_BASELINE_SHA256,
+            'v4': digest(candidate_path.read_bytes()), 'private_native_parser': PARSER_SHA256,
+            'private_native_helpers': HELPERS_SHA256, 'private_native_tag_registry': TAG_REGISTRY_SHA256},
+        'private_version': '6.7.0', 'private_commit': PRIVATE_COMMIT,
+        'changed_plans': sum(r['plan_changed'] for r in rows), 'fallback_integrity_failures': failures,
+        'boundary_integrity_failures': boundary_failures, 'counts': counts,
+        'codex_rule_review': 'PENDING_PER_SAMPLE_REVIEW', 'owner_naturalness': 'PENDING_OWNER_EVALUATION', 'samples': rows}
+    save_report(args.output_dir, report)
+    return {k: report[k] for k in ('status', 'historical_real_api_responses', 'new_api_calls', 'new_qq_sends',
+        'changed_plans', 'fallback_integrity_failures', 'boundary_integrity_failures', 'counts')}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--inventory', action='store_true')
     parser.add_argument('--output-dir', type=Path)
+    parser.add_argument('--comparison', choices=('v3-v31', 'v31-v4'), default='v31-v4')
     try: result = run(parser.parse_args())
     except Exception as exc: result = {'status': 'FAILED', 'error_type': type(exc).__name__}
     print(json.dumps(result, ensure_ascii=False))

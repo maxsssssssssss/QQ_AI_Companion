@@ -3,6 +3,7 @@ from copy import deepcopy
 import hashlib
 import importlib.util
 import json
+import re
 from pathlib import Path
 import tempfile
 from types import SimpleNamespace
@@ -20,6 +21,11 @@ class SyntheticAlgorithm:
 
     def plain_qq_text(self, text): return text
 
+    def trim_boundary_newlines(self, text):
+        if not text.strip(): return text
+        start, end = len(text) - len(text.lstrip()), len(text.rstrip())
+        return text[:start].replace('\r', '').replace('\n', '') + text[start:end] + text[end:].replace('\r', '').replace('\n', '')
+
     def semantic_plan(self, parser, text, *, enabled, fallback_enabled, allow_fallback):
         split = self.parts is not None and (self.source == 'model_markers' or (allow_fallback and fallback_enabled))
         parts = self.parts if split else [text]
@@ -34,8 +40,17 @@ class SyntheticAlgorithm:
     def map_candidate_boundaries(self, candidate, final_text):
         return candidate if candidate and ''.join(candidate) == final_text else None
 
+    def candidate_mapping_reason(self, candidate, final_text):
+        return 'candidate_exact' if self.map_candidate_boundaries(candidate, final_text) else None
+
 
 class HistoryAuditTests(unittest.TestCase):
+    def frozen_baseline(self, name):
+        path = ROOT / audit.V31_BASELINE_RELATIVE
+        if not path.is_file(): self.skipTest('local historical V3.1 evidence not installed')
+        audit.verified_bytes(path, audit.V31_BASELINE_SHA256)
+        return audit.load_module(name, path)
+
     def multibubble(self):
         row = {'case': 'daily', 'variant': 'candidate', 'http': 200, 'error_type': None,
             'output': '合成输出。', 'finish_reason': 'stop', 'usage': {'prompt_tokens': 1},
@@ -167,7 +182,7 @@ class HistoryAuditTests(unittest.TestCase):
 
     def test_pinned_native_helper_and_real_candidate_map_only_eof_chinese_period(self):
         # Local pure functions, synthetic text. No model, event or production data.
-        candidate = audit.load_module('audit_current_candidate_test', ROOT / 'integrations/phase1_guard/bubbles.py')
+        candidate = self.frozen_baseline('audit_current_candidate_test')
         cleanup = audit.native_terminal_cleanup(); parser = audit.native_parser()
         raw = '  今天终于准时下班了！  我们可以慢慢享受这一晚。  \r\n'
         final = cleanup(raw)
@@ -187,6 +202,108 @@ class HistoryAuditTests(unittest.TestCase):
         self.assertFalse(changed['fallback_selected']); self.assertEqual(changed['formatted_parts'], [final.strip()])
         self.assertEqual(cleanup('合成句子。”'), '合成句子”')
         self.assertEqual(cleanup('合成句子.'), '合成句子')
+
+    def test_mapping_diagnostic_uses_actual_variant_not_assumed_terminal_period(self):
+        candidate = self.frozen_baseline('audit_whitespace_candidate_test')
+        parser = audit.native_parser()
+        raw = '今天终于准时下班了！ \n我们可以慢慢享受这一晚。'
+        # Synthetic transform fixture only. The audit CLI still replays its
+        # documented terminal helper, not the full hidden-intent native hook.
+        line_cleanup = lambda text: re.sub(r'[ \t]+(?=\r?$)', '', text, flags=re.M)
+        for cleanup, reason, mapping in (
+            (lambda text: text, 'candidate_exact', 'EXACT'),
+            (line_cleanup, 'candidate_line_end_whitespace_removed', 'LINE_END_WHITESPACE_REMOVED'),
+            (lambda text: line_cleanup(text)[:-1],
+             'candidate_line_end_whitespace_and_terminal_period_removed',
+             'LINE_END_WHITESPACE_AND_TERMINAL_PERIOD_REMOVED')):
+            with self.subTest(reason=reason):
+                record = audit.plan_record(candidate, parser, raw, allow_fallback=True, final_cleanup=cleanup)
+                self.assertEqual(record['final_plan']['reason'], reason)
+                self.assertEqual(record['candidate_mapping'], mapping)
+                self.assertEqual(''.join(record['formatted_parts']), cleanup(raw))
+                self.assertTrue(record['fallback_selected'])
+                self.assertTrue(record['formatted_join_equals_cleaned'])
+                self.assertEqual(record['raw'], raw)
+
+    def test_v4_classifies_final_allowed_text_without_raw_mapper_or_formatter(self):
+        final_parts = ['哈？\n', '原生允许的新正文（真的）']
+        final = ''.join(final_parts)
+        algorithm = SyntheticAlgorithm(final_parts)
+        with patch.object(algorithm, 'candidate_boundaries', side_effect=AssertionError('no_raw_candidate')), \
+             patch.object(algorithm, 'map_candidate_boundaries', side_effect=AssertionError('no_raw_mapping')), \
+             patch.object(algorithm, 'plain_qq_text', side_effect=AssertionError('no_second_formatter')):
+            record = audit.final_text_plan_record(algorithm, None, '插件处理前内容不能恢复',
+                allow_fallback=True, final_cleanup=lambda text: final)
+        self.assertEqual(record['full_cleaned'], final)
+        self.assertEqual(record['formatted_parts'], final_parts)
+        self.assertTrue(record['fallback_exact_after_formatting'])
+        self.assertEqual(record['candidate_mapping'], 'NOT_USED_FINAL_ALLOWED_TEXT')
+        self.assertNotIn('插件处理前', ''.join(record['formatted_parts']))
+
+    def test_v4_separates_exact_slicing_and_boundary_display_cleanup(self):
+        parts = [' 哈？ \r\n', '\n 真的呀（先缓缓） \n']
+        algorithm = SyntheticAlgorithm(parts)
+        record = audit.final_text_plan_record(algorithm, None, ''.join(parts),
+            allow_fallback=True, final_cleanup=lambda text: text)
+        shown = audit.with_display_edges(record, algorithm)
+        self.assertTrue(shown['final_join_equals_cleaned'])
+        self.assertFalse(shown['display_join_equals_cleaned'])
+        self.assertEqual(shown['display_parts'], [' 哈？ ', ' 真的呀（先缓缓） '])
+        self.assertEqual(shown['boundary_newlines_removed'], 4)
+        self.assertTrue(shown['display_boundary_only'])
+        with patch.object(algorithm, 'trim_boundary_newlines', side_effect=lambda text: text.strip()):
+            altered = audit.with_display_edges(record, algorithm)
+        self.assertFalse(altered['display_boundary_only'])
+
+    def test_v4_bad_slicer_and_nonstring_cleanup_are_rejected(self):
+        algorithm = SyntheticAlgorithm(['哈？', '擅自改写'])
+        record = audit.final_text_plan_record(algorithm, None, '哈？本轮允许的原文',
+            allow_fallback=True, final_cleanup=lambda text: text)
+        self.assertEqual(record['integrity'], 'FAIL_FALLBACK_CHANGED_CONTENT')
+        with self.assertRaisesRegex(ValueError, 'native_cleanup_string_required'):
+            audit.final_text_plan_record(algorithm, None, '合成正文', allow_fallback=True,
+                final_cleanup=lambda text: None)
+
+    def test_v4_search_excluded_and_empty_cleanup_not_restored(self):
+        algorithm = SyntheticAlgorithm()
+        for final in ('搜索最终回复', ''):
+            with self.subTest(final=final):
+                record = audit.final_text_plan_record(algorithm, None, '清理前正文',
+                    allow_fallback=False, final_cleanup=lambda text: final)
+                self.assertFalse(record['fallback_selected'])
+                self.assertEqual(record['formatted_parts'], [final])
+                self.assertTrue(record['formatted_join_equals_cleaned'])
+
+    def test_v4_comparison_and_report_keep_complete_model_body_and_scope(self):
+        rows = audit._thinking_records(self.thinking(), 'synthetic-validator-fixture', 1)
+        rows[0]['output'] = '哈？\n真的呀（先缓缓）'
+        before = deepcopy(rows)
+        candidate = SyntheticAlgorithm(['哈？\n', '真的呀（先缓缓）'])
+        compared = audit.compare_v31_v4_records(rows, SyntheticAlgorithm(), candidate, None,
+            final_cleanup=lambda text: text)
+        self.assertEqual(rows, before)
+        self.assertTrue(compared[0]['plan_changed'])
+        self.assertTrue(compared[0]['short_unmarked_nonsearch'])
+        report = audit.markdown({'comparison': 'v31-v4', 'samples': compared})
+        self.assertIn(rows[0]['output'], report)
+        self.assertIn('V3.1', report); self.assertIn('V4', report)
+        self.assertIn('未生成 LLM 自评分', report)
+        self.assertIn('待用户评价', report)
+        self.assertNotIn('SYNTHETIC_REASONING', report)
+
+    def test_frozen_v31_hash_is_verified_independent_of_current_source(self):
+        self.frozen_baseline('audit_v31_identity_test')
+        raw = audit.verified_bytes(ROOT / audit.V31_BASELINE_RELATIVE, audit.V31_BASELINE_SHA256)
+        self.assertIn(b'candidate_boundaries', raw)
+
+    def test_missing_mapper_reason_cannot_be_reported_as_confirmed_period_cleanup(self):
+        parts = ['今天终于准时下班了！', '我们可以慢慢享受这一晚。']
+        algorithm = SyntheticAlgorithm(parts)
+        for reason in (None, '', 'terminal_period_removed'):
+            with self.subTest(reason=reason), patch.object(algorithm, 'candidate_mapping_reason', return_value=reason):
+                with self.assertRaisesRegex(ValueError, 'candidate_mapping_reason_required'):
+                    audit.plan_record(algorithm, None, ''.join(parts), allow_fallback=True,
+                                      final_cleanup=lambda text: text)
 
     def test_native_cleanup_dependency_hash_is_checked(self):
         with tempfile.TemporaryDirectory() as folder:

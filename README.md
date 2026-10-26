@@ -1,5 +1,17 @@
 # QQ AI Companion
 
+2026-10-26：当前人格为用户提供的V0.4，12:24:27 +08:00重启AstrBot后生效，QQ/OneBot核验通过。[发布记录](docs/phase3-persona-v04-release.md)。
+
+2026-10-26早前发布（已由V0.4取代）：人格更新为用户提供的V0.3 Candidate，11:53:50 +08:00重启AstrBot后生效，QQ/OneBot核验通过。[发布记录](docs/phase3-persona-candidate-release.md)。
+
+2026-10-26早前联合发布：[V4多气泡＋V0.3人格已联合上线](docs/phase3-bubbles-v4-persona-release.md)，00:56:45 +08:00启动核验PASS，仅重启AstrBot；QQ在线，NapCat、既有聊天/记忆和配置保持。
+
+2026-10-26发布前开发记录：V4积极分气泡兜底完成本地实现与历史回放；当时仅本地验证，随后已按上述联合发布上线，V3.1为旧版。结果与边界见[专项验证](docs/phase3-multibubble-v4-validation.md)。
+
+2026-10-25 20:15 +08:00：[公开搜索误拦修复](docs/phase3-search-relaxation.md)已上线。允许公开关联词、翻译、近轮话题承接及正常网页参数；保留3/60额度、凭据/隐私和URL安全检查。177项自动回归通过，原失败公开查询的真实DeepSeek Search返回3条结果；仅重启AstrBot，QQ/OneBot在线。
+
+2026-10-25 18:35 +08:00：[主动参数与多气泡清理联合发布](docs/phase3-tuning-bubbles-release.md)已生效。80条近期消息/16000字符、8条主动摘要/普通24小时、每日48次评估/8轮尝试/2小时冷却、北京时间09:00–23:00；同时修复原生行尾空白清理导致的兜底漏分泡。仅重启AstrBot，QQ与OneBot已恢复，聊天、记忆、NapCat及当天计数保持。
+
 2026-10-24最新维护：[主动空计划恢复](docs/phase3-proactive-plan-recovery.md)。修复长期主动启用后候选仍为空的启动缺口；沿用原生调度、当前模型及Guard，主动次数和时段保持。发布只更新一个桥接源码并重启AstrBot，保留NapCat、现有聊天和记忆；验证与上线结果见报告。
 
 基于 AstrBot 的独立集成项目。**Phase 1 的离线集成交付已保留；Phase 2 已完成 VPS 部署、真实 DeepSeek 与 QQ 文本/图片私聊、归档、隔离备份恢复及一次 QQ 重启登录/协议恢复，当前总状态为 PARTIAL。** 真实非授权账号负例和长期稳定性仍需验收。Phase 1 使用合成 OneBot v11 事件和 Mock LLM，在断网容器内运行真实 AstrBot、原生适配器、模型 provider、数据库和所选插件。
@@ -10,9 +22,9 @@
 
 ## Phase 3 当前上线与验收
 
-2026-10-24最新：[清洁开始与统一r4发布](docs/phase3-fresh-start-release.md)。已保留小鲸V0.2、获准L1 3组/L2 12组、登录态与配置，清理旧AI聊天、聊天派生记忆及旧聊天备份；以后新聊天正常记录。r4的13个代码文件＋5份配置已安装，包括C/80轮压缩、长期主动、新气泡提示词、V3.1与通用公开搜索。固定镜像容器已重新创建，**05:10:10 +08:00启动健康与QQ/OneBot连接核对PASS**。未增加真实API或QQ实验。
+2026-10-24基础发布记录（人格与分段版本已由上述后续发布更新）：[清洁开始与统一r4发布](docs/phase3-fresh-start-release.md)。已保留小鲸V0.2、获准L1 3组/L2 12组、登录态与配置，清理旧AI聊天、聊天派生记忆及旧聊天备份；以后新聊天正常记录。r4的13个代码文件＋5份配置已安装，包括C/80轮压缩、长期主动、新气泡提示词、V3.1与通用公开搜索。固定镜像容器已重新创建，**05:10:10 +08:00启动健康与QQ/OneBot连接核对PASS**。未增加真实API或QQ实验。
 
-最新安装的长期主动为北京时间09:00–23:59、每日最多5次发送尝试及5次模型评估、间隔至少3小时，无72小时截止。保留公开搜索3/60额度与隐私校验；QQ客户端加密消息库因登录态保留，不能称所有QQ端历史都已删除。旧备份不可用于恢复已清除聊天，代码配置回滚及新的清洁基线见发布记录。
+当前长期主动已更新为北京时间09:00–23:00、每日最多8轮发送尝试和48次模型评估、间隔至少2小时，无72小时截止；10-24的5/5及3小时为历史配置。保留公开搜索3/60额度与隐私校验；QQ客户端加密消息库因登录态保留，不能称所有QQ端历史都已删除。旧备份不可用于恢复已清除聊天，代码配置回滚及新的清洁基线见发布记录。
 
 ### 本次清理之前的历史发布与验收记录
 
@@ -100,7 +112,7 @@ bash scripts/test-future-tasks.sh
 
 主要配置为 [config/offline.json](config/offline.json)。启动前进行字段检查，离线 profile 只接受 loopback OneBot/LLM 地址、明确的测试凭据、合成身份白名单和 `Asia/Shanghai` 时区。`.env.example` 不包含真实密钥；脚本不会自动加载其中变量。
 
-当前 Phase 3 生产核心为用户确认的 [V0.2 人格](persona/phase3-v0.2.md)，接入与回退见[人格说明](docs/persona-integration.md)。以下旧模板入口仅描述 Phase 1：模板位于 [persona/core_persona.md](persona/core_persona.md) 和 [persona/relationship.md](persona/relationship.md)，读取 `<ASTRBOT_ROOT>/persona.md` 后通过 AstrBot persona API 更新 system prompt。资料示例 [user_profile.example.md](persona/user_profile.example.md) 是合成说明，不会自动成为用户事实。
+当前线上核心已按用户全文更新为 [V0.4 人格](persona/phase3-v0.4.md)，原生记录及渲染正文已核验；[V0.3 Candidate](persona/phase3-v0.3-candidate.md)、[V0.3](persona/phase3-v0.3.md)与[V0.2](persona/phase3-v0.2.md)保留为历史模板，接入与回退见[人格说明](docs/persona-integration.md)。以下旧模板入口仅描述 Phase 1：模板位于 [persona/core_persona.md](persona/core_persona.md) 和 [persona/relationship.md](persona/relationship.md)，读取 `<ASTRBOT_ROOT>/persona.md` 后通过 AstrBot persona API 更新 system prompt。资料示例 [user_profile.example.md](persona/user_profile.example.md) 是合成说明，不会自动成为用户事实。
 
 集成验收有意使用带 `PERSONA_ALPHA` / `PERSONA_BETA` 标记的外置合成人格，以真实模型请求验证修改和重启生效。Mock 回复只能验证请求链路，不能评价人格自然度、亲密关系表现或模型能力。
 

@@ -68,7 +68,7 @@ class NativeAuthorizeTests(unittest.TestCase):
             self.assertNotIn(secret,serialized)
 
     def test_explicit_daily_limits_reach_saved_candidate_and_validation(self):
-        for daily_limit in (1,3,4,5):
+        for daily_limit in (1,3,4,5,8):
             with self.subTest(daily_limit=daily_limit):
                 report=self.candidate(daily_limit=daily_limit)
                 saved=json.loads(self.output.read_text())
@@ -81,7 +81,7 @@ class NativeAuthorizeTests(unittest.TestCase):
 
     def test_invalid_daily_limits_refuse_before_native_calls_or_backup(self):
         backup=self.root/'backup'
-        for daily_limit in (0,6,-1,True,False,2.0,'5',None):
+        for daily_limit in (0,9,-1,True,False,2.0,'5',None):
             with self.subTest(daily_limit=daily_limit), \
                     patch.object(migration,'native_modules') as native, \
                     patch.object(migration,'stopped_image') as stopped, \
@@ -185,7 +185,7 @@ class NativeAuthorizeTests(unittest.TestCase):
         self.assertEqual(calls[1][:-1],command[:-1])
         self.assertEqual(calls[1][-1],'5')
 
-    def test_cli_passes_explicit_limit_to_preparation_and_worker_and_refuses_six(self):
+    def test_cli_passes_explicit_limit_to_preparation_and_worker_and_refuses_nine(self):
         with patch.object(sys,'argv',['migration','--backup-dir',str(self.root/'backup'),
                 '--approved-target-migration','--daily-limit','5']), \
                 patch.object(migration,'migrate',return_value={'status':'PREPARED_NOT_APPLIED'}) as prepare, \
@@ -199,7 +199,7 @@ class NativeAuthorizeTests(unittest.TestCase):
             self.assertEqual(migration.main(),0)
         self.assertEqual(candidate.call_args.kwargs['daily_limit'],5)
         result=subprocess.run([sys.executable,str(ROOT/'scripts/phase3-authorize-native.py'),
-            '--daily-limit','6'],capture_output=True,text=True,check=False)
+            '--daily-limit','9'],capture_output=True,text=True,check=False)
         self.assertEqual(result.returncode,2)
         self.assertIn('invalid choice',result.stderr)
 

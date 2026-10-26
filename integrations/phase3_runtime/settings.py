@@ -8,6 +8,20 @@ CONTINUOUS_PROACTIVE_POLICY = {
     "max_per_day": 5, "max_generations_per_day": 5, "cooldown": 10800,
     "quiet_hours": [0, 9],
 }
+TUNED_PROACTIVE_POLICY = {
+    "mode": "continuous", "window_start": 0, "window_end": 0,
+    "max_per_day": 8, "max_generations_per_day": 48, "cooldown": 7200,
+    "quiet_hours": [23, 9],
+}
+TUNED_PROACTIVE_HISTORY = {"summary_limit": 8, "ordinary_retention_hours": 24}
+
+
+def tuned_proactive_candidate(settings):
+    """Prepare the approved wider context/budgets, preserving activation state."""
+    result = deepcopy(dict(settings))
+    result["proactive_window"] = deepcopy(TUNED_PROACTIVE_POLICY)
+    result["proactive_history"] = deepcopy(TUNED_PROACTIVE_HISTORY)
+    return validate_settings(result)
 
 
 def continuous_proactive_candidate(settings):
@@ -37,6 +51,15 @@ def validate_settings(settings):
     fallback_turns = settings.get("context_compression_fallback_turns", 0)
     if type(fallback_turns) is not int or not 0 <= fallback_turns <= 200:
         raise ValueError("invalid_context_compression_fallback_turns")
+    history = settings.get("proactive_history")
+    if history is not None:
+        if (not isinstance(history, dict)
+            or set(history) != {"summary_limit", "ordinary_retention_hours"}
+            or type(history.get("summary_limit")) is not int
+            or not 1 <= history["summary_limit"] <= 8
+            or type(history.get("ordinary_retention_hours")) is not int
+            or not 6 <= history["ordinary_retention_hours"] <= 24):
+            raise ValueError("invalid_proactive_history")
     if any(settings.get(k) for k in FEATURES) and not settings.get("enabled"):
         raise ValueError("runtime_not_enabled")
     if any(settings.get(k) for k in FEATURES[1:]) and not settings.get("persona"):
@@ -70,14 +93,16 @@ def validate_settings(settings):
             raise ValueError("proactive_trial_exceeds_72_hours")
         limit=window.get("max_per_day",2)
         generation_limit = window.get("max_generations_per_day", limit)
-        ceiling, minimum_cooldown = (5, 10800) if continuous else (2, 14400)
+        ceiling, generation_ceiling, minimum_cooldown = (8, 48, 7200) if continuous else (2, 2, 14400)
         if (type(limit) is not int or not 1 <= limit <= ceiling
-            or type(generation_limit) is not int or not 1 <= generation_limit <= ceiling
+            or type(generation_limit) is not int or not 1 <= generation_limit <= generation_ceiling
             or cooldown < minimum_cooldown):
             raise ValueError("proactive_budget_exceeded")
         quiet=window.get("quiet_hours",[23,9])
-        required_quiet = [0, 9] if continuous else [23, 9]
-        if not isinstance(quiet,(list,tuple)) or any(type(n) is not int for n in quiet) or list(quiet) != required_quiet:
+        # Keep the previously approved continuous window readable for rollback;
+        # the new candidate explicitly narrows it to [23, 9].
+        permitted_quiet = ([0, 9], [23, 9]) if continuous else ([23, 9],)
+        if not isinstance(quiet,(list,tuple)) or any(type(n) is not int for n in quiet) or list(quiet) not in permitted_quiet:
             raise ValueError("proactive_requires_approved_shanghai_hours")
     # AstrBotConfig is a dict subclass with runtime locks on the instance;
     # copy its JSON payload, never deepcopy the host configuration object.

@@ -27,7 +27,8 @@ def files():
         selected.update(ROOT.glob(pattern))
     selected.update(ROOT/p for p in ('README.md','docs/known-issues.md','docs/persona-integration.md',
        'docs/private-profile-import.md','docs/natural-agent-validation.md','persona/phase3-v0.1.md',
-       'persona/phase3-v0.2.md'))
+       'persona/phase3-v0.2.md','persona/phase3-v0.3.md','persona/phase3-v0.3-candidate.md','persona/phase3-v0.4.md',
+       'tests/fixtures/persona-v03-renderer.py','tests/fixtures/persona-v03-candidate-renderer.py'))
     for p in selected:
         if not p.is_file() or p.is_symlink() or '__pycache__' in p.parts:
             raise ValueError('unsafe_or_missing_release_source')

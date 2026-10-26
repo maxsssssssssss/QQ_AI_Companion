@@ -58,11 +58,11 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(manager.prompt, prompt)
         self.assertEqual(manager.kw, {"tools": [], "skills": []})
 
-    async def test_v02_replaces_same_persona_and_rejects_mixed_authorities(self):
+    async def test_current_v04_replaces_same_persona_and_rejects_mixed_authorities(self):
         from integrations.phase3_runtime.persona import CURRENT_TEMPLATE
         template = (ROOT / "persona" / CURRENT_TEMPLATE).read_text()
         prompt = render_persona(template, "合成用户")
-        self.assertEqual(prompt.count("合成用户"), 3)
+        self.assertEqual(prompt.count("合成用户"), 8)
         self.assertNotIn("{{preferred_address}}", prompt)
         self.assertNotIn(MARKER, prompt)
         class Manager:
@@ -71,11 +71,13 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
                 self.name, self.prompt, self.kw = name, system_prompt, kw
         manager = Manager()
         receipt = await install_persona(manager, prompt, tools=["existing_tool"])
-        self.assertEqual(receipt["version"], "0.2")
+        self.assertEqual(receipt["version"], "0.4")
         self.assertEqual((manager.name, manager.prompt), ("qq_companion", prompt))
         self.assertEqual(manager.kw, {"tools": ["existing_tool"], "skills": []})
-        for invalid in (template + MARKER, template + "[QQ_COMPANION_PERSONA_V0_2]",
-                        template.replace("V0_2", "V9_9"),
+        for invalid in (template + "\n# QQ_COMPANION_PERSONA_V0_4",
+                        template + "\n# QQ_COMPANION_PERSONA_V9_9", template + MARKER, template + "[QQ_COMPANION_PERSONA_V0_2]",
+                        template + "[QQ_COMPANION_PERSONA_V0_3]",
+                        template.replace("V0_4", "V9_9"),
                         template.replace("{{preferred_address}}", "替换", 1)):
             with self.assertRaises(ValueError):
                 render_persona(invalid, "合成用户")
@@ -352,10 +354,10 @@ class ContinuousProactiveSettingsTests(unittest.TestCase):
 
     def test_continuous_limits_reject_broadening_and_unintended_expiry(self):
         candidate = continuous_proactive_candidate(dict(enabled=True,persona=True,natural_chat=True,proactive=False))
-        mutations = ({'max_per_day':6},{'max_per_day':True},{'max_generations_per_day':6},
-                     {'max_generations_per_day':True},{'cooldown':10799},{'cooldown':float('nan')},
+        mutations = ({'max_per_day':9},{'max_per_day':True},{'max_generations_per_day':49},
+                     {'max_generations_per_day':True},{'cooldown':7199},{'cooldown':float('nan')},
                      {'window_start':1},{'window_end':1000},{'quiet_hours':[0,8]},
-                     {'quiet_hours':[23,9]},{'quiet_hours':[False,9]})
+                     {'quiet_hours':[22,8]},{'quiet_hours':[False,9]})
         for change in mutations:
             with self.subTest(change=change),self.assertRaises(ValueError):
                 validate_settings({**candidate,'proactive_window':{**candidate['proactive_window'],**change}})

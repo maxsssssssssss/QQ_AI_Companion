@@ -6,15 +6,13 @@ non-streaming text profile, and clears that result to prevent a second dispatch.
 """
 
 import asyncio
-from dataclasses import replace
 import math
 import uuid
 
 from .delivery import DeliveryReceipt, DeliveryService
 from .turns import TurnCoordinator
 from .bubbles import (Pacing, PROMPT, PROMPT_MARKER, semantic_plan, send_sequence, sha,
-                      plain_qq_text, candidate_boundaries, map_candidate_boundaries,
-                      trim_boundary_newlines)
+                      plain_qq_text, fallback_structure_protected, trim_boundary_newlines)
 
 from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, MessageChain, filter
@@ -198,13 +196,19 @@ class Phase1Guard(Star):
         result = event.get_result()
         if result is None or not result.chain:
             return
-        parts = self.semantic_parts(result, event=event,
-            allow_fallback=self.casual_fallback_allowed(event))
-        source=event.get_extra('phase3_segment_plan', {}).get('source')
-        event.set_extra('phase3_casual_split_candidate', source=='smalltalk_fallback')
-        # Classify before native cleanup can remove fences, quotes or URLs.
-        # The late send hook must not reinterpret their cleaned text as chat.
-        event.set_extra("phase3_semantic_classified", True)
+        # Only consume model markers here. Automatic sentence boundaries are
+        # chosen later from the final text that all native hooks have allowed.
+        # Retain a boolean for source code/links/etc if cleanup removes syntax;
+        # no original text or character-mapping metadata survives this hook.
+        event.set_extra('phase3_fallback_source_protected',
+            bool(event.get_extra('phase3_fallback_source_protected'))
+            or fallback_structure_protected(result.get_plain_text()))
+        parts = self.semantic_parts(result, event=event, allow_fallback=False)
+        diagnostic=event.get_extra('phase3_segment_plan', {})
+        source=diagnostic.get('source')
+        event.set_extra('phase3_fallback_marker_protected',
+            bool(event.get_extra('phase3_fallback_marker_protected'))
+            or bool(diagnostic.get('raw_marker_present')))
         if source=='model_markers' and 1 < len(parts) <= 4:
             result.chain = [Plain(part.get_plain_text()) for part in parts]
             event.set_extra("phase3_semantic_boundaries", True)
@@ -227,11 +231,13 @@ class Phase1Guard(Star):
                         and all(isinstance(part, Plain) for part in result.chain)):
                     parts = [result.derive([part]) for part in result.chain if part.text.strip()]
                     parts=[self.qq_plain_chain(part) for part in parts]
+                    diagnostic=dict(event.get_extra('phase3_segment_plan',{}))
+                    diagnostic.update(scope='final_allowed_text',planned_parts=len(parts))
+                    event.set_extra('phase3_segment_plan',diagnostic)
+                    self.trace(event,'cleaned_final',{'segment_plan':diagnostic})
                 else:
                     parts = self.semantic_parts(result, event=event,
-                        allow_fallback=((not event.get_extra('phase3_semantic_classified')
-                                         or event.get_extra('phase3_casual_split_candidate'))
-                                        and self.casual_fallback_allowed(event)),format_for_send=True)
+                        allow_fallback=self.casual_fallback_allowed(event),format_for_send=True)
                 trimmed_newlines=0
                 if kind!='progress':parts,trimmed_newlines=self.trim_bubble_edges(parts)
                 self.trace(event,'cleaned_final',{'parts':len(parts),
@@ -260,7 +266,6 @@ class Phase1Guard(Star):
                     # A projection/ledger exception must never leave the
                     # original result available for native automatic resend.
                     event.clear_result()
-                    event.set_extra('phase3_casual_candidate', None)
                     self._sending_tasks.discard(task)
             return
         if not key or result is None or not result.chain:
@@ -468,10 +473,11 @@ class Phase1Guard(Star):
 
     @filter.on_llm_response(priority=3000000)
     async def recover_empty_final(self, event, response):
-        # Read-only classification before native cleanup. Retain only hashes
-        # and offsets: these cannot restore text a later plugin removes.
-        event.set_extra('phase3_casual_candidate', None)
-        event.set_extra('phase3_original_casual_eligible', False)
+        # Read-only diagnostics before native cleanup. Keep only source
+        # protection booleans, never text/offsets used to restore deleted data.
+        event.set_extra('phase3_fallback_source_protected', False)
+        event.set_extra('phase3_fallback_marker_protected', False)
+        event.set_extra('phase3_semantic_boundaries', False)
         if response is not None:
             choices=getattr(getattr(response,'raw_completion',None),'choices',[]) or []
             reason=getattr(choices[0],'finish_reason',None) if choices else None
@@ -480,7 +486,7 @@ class Phase1Guard(Star):
                 'has_tools':bool(response.tools_call_name),
                 'finish_reason':reason if reason in {'stop','length','tool_calls','content_filter'} else 'unavailable'})
             # Native cleanup can strip protected formatting later. Keep only
-            # eligibility/counts, never a second copy of the response text.
+            # structural protection/counts, never another response body.
             if self.phase3_enabled and self.turn_is_current(event):
                 try:
                     plan=semantic_plan(self.segment_parser(),response.completion_text or '',
@@ -489,12 +495,9 @@ class Phase1Guard(Star):
                     diagnostic['candidate_parts']=diagnostic.pop('planned_parts')
                     diagnostic.update(scope='raw_model_candidate',fallback_config_enabled=self.casual_split_fallback_enabled)
                     self.trace(event, 'model_final', {'segment_plan':diagnostic})
-                    event.set_extra('phase3_original_casual_eligible',plan.source=='smalltalk_fallback')
-                    if (self.casual_split_fallback_enabled and self.casual_fallback_allowed(event)
-                            and not response.tools_call_name and not event.is_stopped()
-                            and plan.source=='smalltalk_fallback' and len(response.completion_text or '')<=100):
-                        event.set_extra('phase3_casual_candidate',
-                                        candidate_boundaries(response.completion_text))
+                    event.set_extra('phase3_fallback_source_protected',
+                                    fallback_structure_protected(response.completion_text or ''))
+                    event.set_extra('phase3_fallback_marker_protected',plan.raw_marker_present)
                 except Exception as exc:
                     logger.warning('Phase3 optional bubble response diagnostics unavailable: %s',type(exc).__name__)
         # Before native cleanup: a deliberately dropped nonempty response must
@@ -661,55 +664,31 @@ class Phase1Guard(Star):
     def casual_fallback_allowed(self, event):
         return (event.get_extra('phase3_delivery_kind', 'normal') not in {'progress','final'}
                 and not event.get_extra('phase3_search_executed')
-                and event.get_extra('phase3_original_casual_eligible', True))
+                and not event.get_extra('phase3_fallback_source_protected')
+                and not event.get_extra('phase3_fallback_marker_protected'))
 
     def semantic_parts(self, result, *, event=None, allow_fallback=True, format_for_send=False):
-        """Pinned marker parsing first, optional bounded ordinary-chat fallback."""
+        """Native markers first; V4 fallback reads only the surviving body."""
         text = result.get_plain_text()
         if not all(isinstance(p, Plain) for p in result.chain):
             return [result]
-        parser=self.segment_parser()
-        # Passive responses must use the pre-cleanup classification. Never
-        # reclassify a plugin's rewritten body into an eligible casual reply.
-        # Direct proactive text has no later native cleanup and is final here.
-        plan=semantic_plan(parser,text,enabled=self.multibubble_enabled,
-            fallback_enabled=self.casual_split_fallback_enabled and event is None,
+        if event is not None:
+            allow_fallback=(allow_fallback and self.casual_fallback_allowed(event)
+                            and self.turn_is_current(event) and not event.is_stopped())
+        plan=semantic_plan(self.segment_parser(),text,enabled=self.multibubble_enabled,
+            fallback_enabled=self.casual_split_fallback_enabled,
             allow_fallback=allow_fallback)
-        if (event is not None and self.casual_split_fallback_enabled and self.multibubble_enabled
-                and allow_fallback and self.casual_fallback_allowed(event)
-                and self.turn_is_current(event) and not event.is_stopped()
-                and plan.source=='single' and plan.reason=='fallback_disabled'):
-            candidate=event.get_extra('phase3_casual_candidate')
-            try:
-                mapped=map_candidate_boundaries(candidate,text)
-            except Exception:
-                mapped=None
-            if mapped and ''.join(mapped)==text:
-                plan=replace(plan,texts=mapped,source='smalltalk_fallback',
-                    reason=('candidate_exact' if sha(text)==candidate.raw_sha256
-                            else 'candidate_terminal_period_removed'))
-            else:
-                plan=replace(plan,reason=('fallback_cleaned_mismatch' if candidate is not None
-                                          else 'fallback_missing_candidate'))
-        elif (event is not None and self.casual_split_fallback_enabled
-                and plan.reason=='fallback_disabled'):
-            # The passive path deliberately disables fresh heuristics above;
-            # diagnostics must not describe that as the user's switch being off.
-            plan=replace(plan,reason=('fallback_context_excluded'
-                if event.get_extra('phase3_delivery_kind','normal') in {'progress','final'}
-                   or event.get_extra('phase3_search_executed')
-                else 'fallback_candidate_unavailable'))
-        if format_for_send and plan.source=='smalltalk_fallback':
-            # V3.1 accepts only plain unstructured prose. Formatting it again
-            # would strip edge whitespace or sentence punctuation, so send its
-            # exact slices after all native safety hooks have had their say.
-            # Only final display-edge CR/LF cleanup follows, before ledgering.
-            parts=[result.derive([Plain(part)]) for part in plan.texts]
-        else:
-            parts=[result.derive([Plain(part)]) for part in plan.texts]
-            if format_for_send:parts=[self.qq_plain_chain(part) for part in parts]
-        if event is not None and (format_for_send or not event.get_extra('phase3_semantic_classified')):
+        parts=[result.derive([Plain(part)]) for part in plan.texts]
+        if format_for_send and plan.source!='smalltalk_fallback':
+            parts=[self.qq_plain_chain(part) for part in parts]
+        # A fallback plan already consists of exact, final permitted slices.
+        # Do not run Markdown cleanup on each slice independently. Cosmetic
+        # edge cleanup still runs once before transport, ledger and history.
+        if event is not None:
             diagnostic=self.segment_diagnostic(plan)
+            diagnostic.update(scope=('final_allowed_text' if format_for_send else 'before_native_decoration'),
+                fallback_source_protected=bool(event.get_extra('phase3_fallback_source_protected')),
+                fallback_marker_protected=bool(event.get_extra('phase3_fallback_marker_protected')))
             event.set_extra('phase3_segment_plan',diagnostic)
             self.trace(event,'cleaned_final',{'segment_plan':diagnostic})
         return parts

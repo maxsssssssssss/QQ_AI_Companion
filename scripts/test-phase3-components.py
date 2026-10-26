@@ -30,7 +30,10 @@ PATTERNS=['test_phase3_runtime.py','test_phase3_staging.py','test_phase3_deliver
  'test_phase3_context_fallback.py','test_phase3_proactive_continuous.py',
  'test_phase3_proactive_pending.py','test_phase3_bubbles_v3_release.py','test_phase3_search_pending.py',
  'test_phase3_bubbles_history_audit.py','test_phase3_proactive_plan_recovery.py',
- 'test_phase3_proactive_recovery_release.py']
+ 'test_phase3_proactive_recovery_release.py','test_phase3_proactive_context.py',
+ 'test_phase3_proactive_history_policy.py','test_phase3_proactive_tuning.py',
+ 'test_phase3_tuning_bubbles_release.py','test_phase3_search_relaxed_policy.py',
+ 'test_phase3_search_relaxation_release.py','test_phase3_bubbles_v4_persona_release.py','test_phase3_persona_candidate_release.py','test_phase3_persona_v04_release.py','test_phase3_persona_native.py']
 
 def child(pattern, output):
     sys.path[:0]=[str(ROOT),str(ROOT/'scripts'),str(ROOT/'.runtime/upstream/AstrBot')]

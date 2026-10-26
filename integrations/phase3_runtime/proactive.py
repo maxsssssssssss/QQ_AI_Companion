@@ -128,10 +128,10 @@ def native_proactive_config(original, admin_id, enabled=False, *, policy=None):
         "basic_config": {"target_user_ids": [str(admin_id)], "target_platform": "aiocqhttp",
             "enable_auto_user_profile_creation": False, "default_proactive_enabled": False,
             "default_proactive_daily_limit": 0, "enable_worldview_perception": False,
-            "quiet_hours": "00:00-09:00" if mode == 'continuous' else "23:00-09:00"},
+            "quiet_hours": ("%02d:00-%02d:00" % tuple(policy.get('quiet_hours', [0, 9]))) if mode == 'continuous' else "23:00-09:00"},
         "proactive_reach_config": {"proactive_intensity_preset": "off", "max_daily_messages": 0},
         "private_followup_config": {"enable_group_conversation_followup": False,
-            "min_interval_minutes": 180 if mode == 'continuous' else 240, "enable_proactive_burst": False,
+            "min_interval_minutes": math.ceil(policy.get('cooldown', 10800) / 60) if mode == 'continuous' else 240, "enable_proactive_burst": False,
             "proactive_unanswered_pause_after": 0},
         "proactive_generation_config": {"enable_llm_proactive_message": False,
             "enable_llm_proactive_persona_judge": False},
@@ -175,7 +175,7 @@ def authorize_native_target(private, session, *, approved=False, daily_limit=2):
     private-chat UMO. Caller must back up the native store before this operation.
     This is not invoked merely because a configuration file enables the bridge.
     """
-    if approved is not True or type(daily_limit) is not int or not 1 <= daily_limit <= 5:
+    if approved is not True or type(daily_limit) is not int or not 1 <= daily_limit <= 8:
         raise PermissionError("explicit_target_migration_approval_required")
     parts = str(session).split(":")
     if len(parts) != 3 or parts[1] != "FriendMessage" or not parts[2].isdigit():
@@ -197,11 +197,11 @@ class ProactiveGate:
         for value in (window_start, window_end, cooldown):
             if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
                 raise ValueError("invalid_proactive_limit")
-        if type(max_per_day) is not int or not 1 <= max_per_day <= 5 or cooldown < 60:
+        if type(max_per_day) is not int or not 1 <= max_per_day <= 8 or cooldown < 60:
             raise ValueError("invalid_proactive_limit")
         if max_generations_per_day is None:
             max_generations_per_day = max_per_day
-        if type(max_generations_per_day) is not int or not 1 <= max_generations_per_day <= 5:
+        if type(max_generations_per_day) is not int or not 1 <= max_generations_per_day <= 48:
             raise ValueError('invalid_proactive_generation_limit')
         if mode not in {'trial', 'continuous'}:
             raise ValueError('invalid_proactive_mode')
@@ -421,13 +421,15 @@ class NativeProactiveBridge:
         'absence_miss', 'state_share', 'quiet_care', 'check_in'})
 
     def __init__(self, private, guard, gate, outcome_type, *, event_resolver=None, event_source=None,
-                 event_delivered=None, generation_timeout=60):
+                 event_delivered=None, generation_timeout=60, history_policy=None):
         if not math.isfinite(generation_timeout) or not 0 < generation_timeout <= 120:
             raise ValueError("invalid_generation_timeout")
         self.private, self.guard, self.gate, self.outcome_type = private, guard, gate, outcome_type
         self.event_resolver, self.event_delivered = event_resolver, event_delivered
         self.event_source = event_source
         self.generation_timeout = generation_timeout
+        from .proactive_history import NativeProactiveHistory
+        self._history_adapter = NativeProactiveHistory(private, gate.session, history_policy)
         self.original = None
         self.original_generate = None
         self.original_framework = None
@@ -447,6 +449,7 @@ class NativeProactiveBridge:
                     "_planned_proactive_delivery_key", "_planned_proactive_impulse")
         if any(not callable(getattr(self.private, name, None)) for name in required):
             raise ValueError("pinned_private_proactive_api_missing")
+        self._history_adapter.check_api()
         self._reconcile_guard_attempts()
         self.original = self.private._send_proactive_message_chain
         self.original_generate = self.private._generate_proactive_message_with_llm
@@ -472,6 +475,7 @@ class NativeProactiveBridge:
             if callable(original):
                 self._additional_bindings[name] = original
                 setattr(self.private, name, callback)
+        self._history_adapter.attach(self._additional_bindings)
 
     def _reconcile_guard_attempts(self):
         """Observe acknowledged prefixes after restart; never resume a send."""
@@ -833,7 +837,7 @@ class NativeProactiveBridge:
         if (self.gate.mode == 'continuous' and self.gate.enabled
                 and self._native_settings_active and reason in self.CONTINUOUS_REASONS
                 and (user is None or isinstance(user, dict) and user.get('umo') == self.gate.session)):
-            return [(9 * 60, 24 * 60)]
+            return [(self.gate.quiet[1] * 60, (self.gate.quiet[0] or 24) * 60)]
         return self._additional_bindings['_reason_windows'](reason, user)
 
     async def no_second_generation(self, user, *args, **kwargs):

@@ -49,6 +49,10 @@ class StagingTests(unittest.TestCase):
         report = stage.stage(self.snapshot, self.root / 'candidate', self.settings)
         self.assertEqual(report['mode'], 'STAGED_NOT_DEPLOYED')
         self.assertFalse(report['production_changes'])
+        from integrations.phase3_runtime.persona import CURRENT_TEMPLATE, render_persona, persona_version
+        staged_template=(self.root/'candidate/data/phase3/persona-v0.1.md').read_text()
+        self.assertEqual(staged_template,(ROOT/'persona'/CURRENT_TEMPLATE).read_text())
+        self.assertEqual(persona_version(render_persona(staged_template,'合成用户'))[0],'0.4')
         self.assertNotIn('synthetic-chat-key', str(report))
         self.assertEqual((self.snapshot / 'data/cmd_config.json').read_bytes(), original)
         self.assertEqual((self.root / 'candidate/data/cmd_config.json').stat().st_mode & 0o777, 0o600)

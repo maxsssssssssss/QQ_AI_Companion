@@ -18,6 +18,7 @@ sys.path[:0] = [str(ROOT), str(ROOT / "scripts"), str(ROOT / "tests")]
 from offline_peers import MockLLM, OneBotPeer, action_text
 from prepare_plugins import prepare_plugins
 from integrations.phase3_runtime.settings import private_config
+from integrations.phase3_runtime.persona import CURRENT_TEMPLATE
 from integrations.phase1_guard.bubbles import PROMPT, PROMPT_MARKER, MARKER
 from integrations.phase3_memory.bridge import native_config
 from phase3_memory_http_fixture import MemoryMockLLM
@@ -84,8 +85,8 @@ class Suite:
         path.write_text(json.dumps(memory))
         (self.state / "data/phase3").mkdir()
         # The stable destination name is part of the existing runtime contract;
-        # its content is the already approved current V0.2 template.
-        shutil.copyfile(ROOT / "persona/phase3-v0.2.md", self.state / "data/phase3/persona-v0.1.md")
+        # its content is the already approved current V0.4 template.
+        shutil.copyfile(ROOT / "persona" / CURRENT_TEMPLATE, self.state / "data/phase3/persona-v0.1.md")
 
     async def start(self):
         (self.state / "startup.json").unlink(missing_ok=True)
@@ -193,6 +194,7 @@ class Suite:
         """Exercise the unchanged native decoration/Guard/history pipeline."""
         acknowledged=[]
         for prefix,kind,expected in [
+            ('隔离V31短句合并','v31_short_merged',['终于忙完啦！','今晚可以安心歇一会儿了']),
             ('隔离V3普通两句','v3_casual_fallback',['今天可算忙完了！','今晚可以安心歇一会儿了']),
             ('隔离V31普通三句','v31_three_fallback',
              ['今天真的忙完啦！🎉  ','今晚可以安心歇一会儿了。  ','明天的事就留给明天吧！']),
@@ -206,10 +208,10 @@ class Suite:
             calls = self.chat_requests()[before:]
             assert len(calls) == 1 and calls[0]['kind'] == kind
             raw = calls[0]['response']['choices'][0]['message']['content']
-            assert MARKER not in raw and len(raw)<=100
+            assert MARKER not in raw and len(raw)<=160
             assert [action_text(action) for action in actions] == expected
-            # Boundary metadata permits only the known terminal-period
-            # deletion, not restoring it or rewriting any cleaned character.
+            # V4 plans from the final native text, without reconstructing
+            # deleted terminal punctuation or using raw boundary metadata.
             final_cleaned=raw.rstrip('。')
             assert ''.join(expected) == final_cleaned
             with sqlite3.connect(self.state/'data/plugin_data/phase1_guard/guard.sqlite3') as db:
@@ -221,10 +223,9 @@ class Suite:
             assert diag['cleaned_final']['segment_plan']['source']=='smalltalk_fallback'
             assert diag['cleaned_final']['confirmed_parts']==len(expected)
             acknowledged.extend(expected)
-        self.record('I21', 'V3.1 complete two/three/four-sentence candidates passed the full native cleanup into individually acknowledged Guard parts; one HTTP model request each, concatenation exactly matched cleaned text including spacing/Emoji, removed terminal periods were not restored')
+        self.record('I21', 'V4 short reactions and two/three/four-sentence final replies passed full native cleanup into individually acknowledged Guard parts; one HTTP model request each, concatenation exactly matched final text including spacing/Emoji, removed periods were not restored')
 
         for prefix, kind in [('隔离V3短单句', 'v3_short_single'),
-                             ('隔离V31短句合并', 'v31_short_merged'),
                              ('隔离V3连续长句', 'v3_continuous_single'),
                              ('隔离V3技术结构', 'v3_technical_single')]:
             before = len(self.chat_requests())
@@ -239,7 +240,7 @@ class Suite:
             with sqlite3.connect(self.state/'data/plugin_data/phase1_guard/guard.sqlite3') as db:
                 parts = db.execute('SELECT state,text FROM deliveries WHERE turn_id=(SELECT turn_id FROM turns ORDER BY rowid DESC LIMIT 1)').fetchall()
             assert parts == [('sent', expected_text)]
-        self.record('I22', 'V3.1 short Emoji reply, a below-six-character first sentence merged with its successor, uninterrupted long sentence and SQL explanation each remained one acknowledged bubble after fixed native cleanup; no content truncation')
+        self.record('I22', 'V4 short Emoji reply, uninterrupted long sentence and SQL explanation each remained one acknowledged bubble after fixed native cleanup; short reaction pair covered as two acknowledged bubbles in I21; no content truncation')
 
         deliveries = self.rows('deliveries')
         await self.stop()
@@ -273,9 +274,9 @@ class Suite:
             assert len(calls) == 1, len(calls)
             payload = json.dumps(calls[0]["request"], ensure_ascii=False)
             assert all(text in payload for text in messages)
-            assert payload.count("[QQ_COMPANION_PERSONA_V0_2]") == 1
+            assert payload.count("# QQ_COMPANION_PERSONA_V0_4") == 1
             assert all(text in action_text(action) for text in messages)
-            self.record("I02", "Three real WS inputs became one HTTP model call with one approved V0.2 persona and one reply")
+            self.record("I02", "Three real WS inputs became one HTTP model call with one approved V0.4 persona and one reply")
             await self.peer.ws.send_json(events[0])
             await self.peer.emit("合成未授权消息", user=10002)
             await self.peer.emit("/合成群消息", group=20001)
@@ -292,7 +293,7 @@ class Suite:
             await asyncio.sleep(.5)
             assert "合成重启后继续" in action_text(reply)
             payload = json.dumps(self.chat_requests()[-1]["request"], ensure_ascii=False)
-            assert "[QQ_COMPANION_PERSONA_V0_2]" in payload
+            assert "# QQ_COMPANION_PERSONA_V0_4" in payload
             assert all(text in payload for text in messages)
             self.record("I05", "New process retained persona, prior context and continued OneBot chat")
             await self.peer.send('我是一名工程师。我住在苏州。我喜欢清茶。明天有面试，还有一份报告没完成。', timeout=40)

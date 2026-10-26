@@ -3,12 +3,16 @@ from hashlib import sha256
 import re
 
 MARKER = "[QQ_COMPANION_PERSONA_V0_1]"
-CURRENT_TEMPLATE = "phase3-v0.2.md"
-VERSIONS = {MARKER: ("0.1", 1), "[QQ_COMPANION_PERSONA_V0_2]": ("0.2", 3)}
+CURRENT_TEMPLATE = "phase3-v0.4.md"
+VERSIONS = {MARKER: ("0.1", 1), "[QQ_COMPANION_PERSONA_V0_2]": ("0.2", 3),
+            "[QQ_COMPANION_PERSONA_V0_3]": ("0.3", 4),
+            "[QQ_COMPANION_PERSONA_V0_3_CANDIDATE]": ("0.3-candidate", 6),
+            "# QQ_COMPANION_PERSONA_V0_4": ("0.4", 8)}
 
 
 def persona_version(prompt: str) -> tuple[str, int]:
     markers = re.findall(r"\[QQ_COMPANION_PERSONA_[^\]\r\n]*\]", prompt)
+    markers += re.findall(r"^# QQ_COMPANION_PERSONA_[^\r\n]*$", prompt, re.MULTILINE)
     if len(markers) != 1 or markers[0] not in VERSIONS:
         raise ValueError("missing_single_persona_authority")
     return VERSIONS[markers[0]]
