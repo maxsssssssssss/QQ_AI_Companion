@@ -14,6 +14,27 @@ TUNED_PROACTIVE_POLICY = {
     "quiet_hours": [23, 9],
 }
 TUNED_PROACTIVE_HISTORY = {"summary_limit": 8, "ordinary_retention_hours": 24}
+FREQUENCY_PROACTIVE_POLICY = {
+    "mode": "continuous", "window_start": 0, "window_end": 0,
+    "max_per_day": 12, "max_generations_per_day": 96, "cooldown": 5400,
+    "quiet_hours": [23, 9],
+}
+
+
+def frequency_proactive_candidate(settings):
+    """Change only the three approved frequency fields of an existing policy.
+
+    Historical candidate helpers intentionally retain their original contracts.
+    This helper neither enables delivery nor changes history, idle or scheduling.
+    """
+    result = deepcopy(dict(settings))
+    window = result.get("proactive_window")
+    if (not isinstance(window, dict) or window.get("mode") != "continuous"
+            or window.get("quiet_hours") != [23, 9]):
+        raise ValueError("frequency_requires_existing_09_23_continuous_policy")
+    for key in ("max_per_day", "max_generations_per_day", "cooldown"):
+        window[key] = FREQUENCY_PROACTIVE_POLICY[key]
+    return validate_settings(result)
 
 
 def tuned_proactive_candidate(settings):
@@ -93,7 +114,7 @@ def validate_settings(settings):
             raise ValueError("proactive_trial_exceeds_72_hours")
         limit=window.get("max_per_day",2)
         generation_limit = window.get("max_generations_per_day", limit)
-        ceiling, generation_ceiling, minimum_cooldown = (8, 48, 7200) if continuous else (2, 2, 14400)
+        ceiling, generation_ceiling, minimum_cooldown = (12, 96, 5400) if continuous else (2, 2, 14400)
         if (type(limit) is not int or not 1 <= limit <= ceiling
             or type(generation_limit) is not int or not 1 <= generation_limit <= generation_ceiling
             or cooldown < minimum_cooldown):

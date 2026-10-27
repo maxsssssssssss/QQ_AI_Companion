@@ -32,7 +32,7 @@ class TuningCandidateTests(unittest.TestCase):
         self.assertEqual(validate_settings(base),base)
     def test_rejects_caps_and_leaves_trial_limits_intact(self):
         good=tuned_proactive_candidate(settings())
-        for change in ({'max_per_day':9},{'max_generations_per_day':49},{'cooldown':7199},
+        for change in ({'max_per_day':13},{'max_generations_per_day':97},{'cooldown':5399},
                        {'max_generations_per_day':True},{'quiet_hours':[22,8]}):
             with self.subTest(change=change),self.assertRaises(ValueError):
                 validate_settings({**good,'proactive_window':{**good['proactive_window'],**change}})

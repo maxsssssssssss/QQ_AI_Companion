@@ -223,8 +223,8 @@ def proactive_status(data,now):
     result={'requested':boolean(cfg.get('proactive')),'mode':mode,'timezone':'Asia/Shanghai',
         'window_start':iso_time(start),'window_end':iso_time(end),
         'has_scheduled_expiry':False if continuous else (True if mode=='trial' and iso_time(end) else None),
-        'max_per_day':number(window.get('max_per_day'),maximum=8),
-        'max_generations_per_day':number(window.get('max_generations_per_day'),maximum=48),
+        'max_per_day':number(window.get('max_per_day'),maximum=12),
+        'max_generations_per_day':number(window.get('max_generations_per_day'),maximum=96),
         'cooldown_seconds':number(window.get('cooldown'),maximum=604800),'quiet_hours':quiet,
         'state_scope':'derived_from_config_and_durable_ledger_not_live_plugin_flags'}
     stamp=now.timestamp();today=now.astimezone(SHANGHAI).date().isoformat()

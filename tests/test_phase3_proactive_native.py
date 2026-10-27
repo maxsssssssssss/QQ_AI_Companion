@@ -476,7 +476,7 @@ class NativeProactiveTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(cfg['private_followup_config']['min_interval_minutes'], 180)
         self.assertEqual(cfg['proactive_reach_config']['max_daily_messages'], 0)
         self.assertFalse(cfg['proactive_generation_config']['enable_llm_proactive_message'])
-        for limit in (0, 9, True):
+        for limit in (0, 13, True):
             with self.assertRaises(PermissionError):
                 authorize_native_target(self.private,self.private.user['umo'],approved=True,daily_limit=limit)
         authorize_native_target(self.private,self.private.user['umo'],approved=True,daily_limit=5)
@@ -520,6 +520,59 @@ class NativeProactiveTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.private._reason_windows('birthday_celebration', self.private.user), original_birthday)
         self.bridge.detach()
         self.assertFalse(native_check('open_loop_followup', self.private.user))
+
+    def test_frequency_12_keeps_native_tier_idle_and_candidate_policy_at_tier3(self):
+        # Real fixed native quota/idle methods, including custom relationship
+        # policy. Only persona config lookup and the synthetic user are fixtures.
+        self.private._proactive_quota_policy = types.MethodType(
+            scheduler.ProactiveMixin._proactive_quota_policy, self.private)
+        self.private._private_user_role = lambda user: 'friend'
+        self.private.proactive_intensity_preset = 'off'
+        self.private.enable_custom_relationship_stage_policy = True
+        self.private.idle_minutes = 60
+        self.private.min_interval_minutes = 120
+        self.private.user.update(relationship_role='friend',relationship_mode='normal',
+            relationship_score=0,proactive_idle_minutes=-1,proactive_min_interval_minutes=-1,
+            current_interaction={'expression_band':'relaxed'})
+        policies=[]
+        for daily in (8,12):
+            self.private.max_daily_messages=daily
+            self.private.user['proactive_daily_limit']=daily
+            self.assertEqual(self.private._effective_user_daily_limit(self.private.user),daily)
+            self.assertEqual(self.private._effective_user_idle_minutes(self.private.user),45)
+            self.assertEqual(self.private._effective_user_min_interval_minutes(self.private.user),90)
+            policy=self.private._proactive_quota_policy(self.private.user)
+            self.assertEqual(policy['tier'],3)
+            policies.append({key:value for key,value in policy.items() if key!='quota'})
+        self.assertEqual(*policies)
+        self.private.min_interval_minutes=90
+        self.assertEqual(self.private._effective_user_min_interval_minutes(self.private.user),90)
+        self.private.user['proactive_idle_minutes']=60
+        self.assertEqual(self.private._effective_user_idle_minutes(self.private.user),60)
+
+    def test_frequency_native_12_target_activation_and_detach_keep_disk_cold(self):
+        from integrations.phase3_runtime.settings import FREQUENCY_PROACTIVE_POLICY
+        self.bridge.detach();self.gate.close()
+        self.now=datetime.fromisoformat('2026-10-27T09:00:00+08:00').timestamp()
+        self.gate=ProactiveGate(Path(self.temp.name)/'gate.sqlite',allowed_session=self.private.user['umo'],
+            enabled=True,clock=lambda:self.now,**FREQUENCY_PROACTIVE_POLICY)
+        cfg=native_proactive_config({},'10001',enabled=True,policy=FREQUENCY_PROACTIVE_POLICY)
+        self.private.config=cfg;self.private.max_daily_messages=0
+        self.private.enable_llm_proactive_message=False;self.private.min_interval_minutes=90
+        self.private.idle_minutes=60;self.private.quiet_hours='23:00-09:00'
+        self.private.proactive_intensity_preset='off'
+        authorize_native_target(self.private,self.private.user['umo'],approved=True,daily_limit=12)
+        self.bridge=NativeProactiveBridge(self.private,self.guard,self.gate,message._ProactiveSendOutcome)
+        self.bridge.attach();self.assertTrue(self.bridge.activate_native_config())
+        self.assertEqual(self.private._effective_user_daily_limit(self.private.user),12)
+        self.assertEqual(self.private.min_interval_minutes,90)
+        self.assertEqual(self.private.idle_minutes,60)
+        self.assertEqual(self.private.quiet_hours,'23:00-09:00')
+        self.assertEqual(cfg['proactive_reach_config']['max_daily_messages'],0)
+        self.assertFalse(cfg['proactive_generation_config']['enable_llm_proactive_message'])
+        self.bridge.detach()
+        self.assertEqual(self.private.max_daily_messages,0)
+        self.assertFalse(self.private.enable_llm_proactive_message)
 
     async def test_continuous_scheduler_does_not_expire_at_zero_or_72_hours(self):
         self.continuous_gate()

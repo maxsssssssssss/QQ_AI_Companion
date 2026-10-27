@@ -202,6 +202,19 @@ class StatusTests(unittest.TestCase):
         report=status.proactive_status(self.data,datetime.fromisoformat('2026-10-22T11:00:00+08:00'))
         self.assertEqual(report['window_state'],'IN_WINDOW');self.assertFalse(report['paused'])
 
+    def test_frequency_12_96_90_report_preserves_ledger(self):
+        config=self.continuous_fixture()
+        config['proactive_window'].update(max_per_day=12,max_generations_per_day=96,
+            cooldown=5400,quiet_hours=[23,9])
+        self.write('config/phase3_runtime_config.json',config)
+        before=self.proactive.read_bytes()
+        report=status.proactive_status(self.data,self.now)
+        self.assertEqual((report['max_per_day'],report['max_generations_per_day'],report['cooldown_seconds']),
+                         (12,96,5400))
+        self.assertEqual(report['quiet_hours'],[23,9])
+        self.assertEqual(before,self.proactive.read_bytes())
+        self.assertNotIn(SECRET,json.dumps(report));self.assertNotIn(IDENTITY,json.dumps(report))
+
     def test_indefinite_pause_survives_return_to_trial(self):
         self.fixtures()
         with sqlite3.connect(self.proactive) as db:

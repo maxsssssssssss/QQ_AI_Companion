@@ -175,7 +175,7 @@ def authorize_native_target(private, session, *, approved=False, daily_limit=2):
     private-chat UMO. Caller must back up the native store before this operation.
     This is not invoked merely because a configuration file enables the bridge.
     """
-    if approved is not True or type(daily_limit) is not int or not 1 <= daily_limit <= 8:
+    if approved is not True or type(daily_limit) is not int or not 1 <= daily_limit <= 12:
         raise PermissionError("explicit_target_migration_approval_required")
     parts = str(session).split(":")
     if len(parts) != 3 or parts[1] != "FriendMessage" or not parts[2].isdigit():
@@ -197,11 +197,11 @@ class ProactiveGate:
         for value in (window_start, window_end, cooldown):
             if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
                 raise ValueError("invalid_proactive_limit")
-        if type(max_per_day) is not int or not 1 <= max_per_day <= 8 or cooldown < 60:
+        if type(max_per_day) is not int or not 1 <= max_per_day <= 12 or cooldown < 60:
             raise ValueError("invalid_proactive_limit")
         if max_generations_per_day is None:
             max_generations_per_day = max_per_day
-        if type(max_generations_per_day) is not int or not 1 <= max_generations_per_day <= 48:
+        if type(max_generations_per_day) is not int or not 1 <= max_generations_per_day <= 96:
             raise ValueError('invalid_proactive_generation_limit')
         if mode not in {'trial', 'continuous'}:
             raise ValueError('invalid_proactive_mode')

@@ -164,7 +164,7 @@ class ContinuousGateTests(unittest.IsolatedAsyncioTestCase):
         finally:
             trial.close()
         for options in ({'window_start':1}, {'window_end':1}, {'mode':'always'},
-                        {'max_generations_per_day':0}, {'max_generations_per_day':49},
+                        {'max_generations_per_day':0}, {'max_generations_per_day':97},
                         {'max_generations_per_day':True}):
             with self.subTest(options=options), self.assertRaises(ValueError):
                 self.open_gate(**options)

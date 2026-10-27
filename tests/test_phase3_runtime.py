@@ -354,8 +354,8 @@ class ContinuousProactiveSettingsTests(unittest.TestCase):
 
     def test_continuous_limits_reject_broadening_and_unintended_expiry(self):
         candidate = continuous_proactive_candidate(dict(enabled=True,persona=True,natural_chat=True,proactive=False))
-        mutations = ({'max_per_day':9},{'max_per_day':True},{'max_generations_per_day':49},
-                     {'max_generations_per_day':True},{'cooldown':7199},{'cooldown':float('nan')},
+        mutations = ({'max_per_day':13},{'max_per_day':True},{'max_generations_per_day':97},
+                     {'max_generations_per_day':True},{'cooldown':5399},{'cooldown':float('nan')},
                      {'window_start':1},{'window_end':1000},{'quiet_hours':[0,8]},
                      {'quiet_hours':[22,8]},{'quiet_hours':[False,9]})
         for change in mutations:

@@ -51,7 +51,7 @@
   },
   "proactive_window": {
     "type": "object",
-    "description": "Trial keeps its dated 2-attempt policy. Latest continuous candidate: max_per_day=8, max_generations_per_day=48, cooldown=7200, quiet_hours=[23,9]. Existing continuous policy remains readable for rollback.",
+    "description": "Trial keeps its dated 2-attempt policy. Latest continuous candidate: max_per_day=12, max_generations_per_day=96, cooldown=5400, quiet_hours=[23,9]. Cooldown is a minimum attempt interval, never a scheduled send. Existing continuous policies remain readable for rollback.",
     "items": {
       "mode": {
         "type": "string",
@@ -68,7 +68,8 @@
       },
       "max_per_day": {
         "type": "int",
-        "default": 2
+        "default": 2,
+        "description": "Daily proactive plan attempts, not bubble count. Continuous accepts 1..12; trial keeps its existing limit."
       },
       "cooldown": {
         "type": "int",
@@ -85,7 +86,7 @@
       "max_generations_per_day": {
         "type": "int",
         "default": 0,
-        "description": "Daily model-evaluation attempts including skip/defer/errors. Continuous accepts 1..48. Trial 0 inherits its existing daily limit."
+        "description": "Daily model-evaluation attempts including skip/defer/errors. Continuous accepts 1..96. Trial 0 inherits its existing daily limit."
       }
     }
   },
