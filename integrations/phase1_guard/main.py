@@ -36,8 +36,8 @@ class Phase1Guard(Star):
         self.casual_split_fallback_enabled = config.get("phase3_casual_split_fallback_enabled", False) is True
         self.plain_text_enabled = config.get("phase3_plain_text_enabled", False) is True
         self.empty_recovery_enabled = config.get("phase3_empty_recovery_enabled", False) is True
-        self.pacing = Pacing(float(config.get('phase3_bubble_min_interval',1.0)),
-                             float(config.get('phase3_bubble_max_interval',2.0)))
+        self.pacing = Pacing(float(config.get('phase3_bubble_min_interval',2.0)),
+                             float(config.get('phase3_bubble_max_interval',4.0)))
         self.stopping = False
         self._sending_tasks = set()
         self.phase3_admin_id = str(config.get("phase3_admin_id", ""))

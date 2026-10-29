@@ -19,6 +19,21 @@ FREQUENCY_PROACTIVE_POLICY = {
     "max_per_day": 12, "max_generations_per_day": 96, "cooldown": 5400,
     "quiet_hours": [23, 9],
 }
+AUTONOMY_DEFAULTS = {
+    'enabled': False, 'exploration': True, 'self_preferences': True,
+    'supplements': True, 'model_requests_per_day': 144,
+    'tool_attempts_per_day': 288, 'tools_per_opportunity': 3,
+    'exploration_seconds': 600, 'audit_retention_days': 14,
+    'audit_capacity_bytes': 67108864, 'pocket_limit': 64,
+    'supplement_min_seconds': 300, 'supplement_max_seconds': 3600,
+}
+
+
+def autonomy_candidate(settings):
+    """Prepare explicit feature activation without rewriting frequency policy."""
+    result = deepcopy(dict(settings))
+    result['proactive_autonomy'] = {**AUTONOMY_DEFAULTS, 'enabled': True}
+    return validate_settings(result)
 
 
 def frequency_proactive_candidate(settings):
@@ -59,6 +74,25 @@ def validate_settings(settings):
     # A native host adds schema defaults to old snapshots. A trial's zero
     # generation sentinel must inherit its existing limit, never broaden it.
     settings = deepcopy(dict(settings))
+    autonomy = settings.get('proactive_autonomy', {})
+    if not isinstance(autonomy, dict) or set(autonomy) - set(AUTONOMY_DEFAULTS):
+        raise ValueError('invalid_autonomy_configuration')
+    effective = {**AUTONOMY_DEFAULTS, **autonomy}
+    for name in ('enabled', 'exploration', 'self_preferences', 'supplements'):
+        if type(effective[name]) is not bool:
+            raise ValueError('invalid_autonomy_switch')
+    bounds = {'model_requests_per_day':(1,144), 'tool_attempts_per_day':(1,288),
+              'tools_per_opportunity':(1,3), 'exploration_seconds':(30,600),
+              'audit_retention_days':(1,14), 'audit_capacity_bytes':(1048576,268435456),
+              'pocket_limit':(1,128), 'supplement_min_seconds':(60,3600),
+              'supplement_max_seconds':(300,14400)}
+    if any(type(effective[k]) is not int or not low <= effective[k] <= high
+           for k,(low,high) in bounds.items()):
+        raise ValueError('invalid_autonomy_limit')
+    if effective['supplement_min_seconds'] >= effective['supplement_max_seconds']:
+        raise ValueError('invalid_supplement_window')
+    if effective['enabled'] and not settings.get('proactive'):
+        raise ValueError('autonomy_requires_existing_proactive_authorization')
     stored_window = settings.get("proactive_window")
     if (isinstance(stored_window, dict) and stored_window.get("mode", "trial") == "trial"
         and type(stored_window.get("max_generations_per_day")) is int

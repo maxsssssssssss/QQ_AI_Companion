@@ -313,19 +313,21 @@ class NativeBubbleTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(actual,expected);self.assertEqual(''.join(actual),text)
                 self.assertEqual(self.history_text(history),'\n'.join(expected))
 
-    async def test_v31_pacing_waits_only_after_first_ack_and_is_bounded_one_to_two_seconds(self):
+    async def test_random_pacing_waits_only_after_first_ack_and_history_stays_confirmed(self):
         text='今天可算忙完了！今晚可以安心歇一会儿了。明天的事就留给明天吧。'
         event,history=await self.v3_prepared(text)
         self.guard.pacing=Pacing()
-        self.assertEqual((self.guard.pacing.minimum,self.guard.pacing.maximum),(1,2))
+        self.assertEqual((self.guard.pacing.minimum,self.guard.pacing.maximum),(2,4))
         waits=[]
         async def fake_interval(delay,is_current,**kwargs):
             waits.append((len(self.calls),delay))
             return is_current()
-        with patch('integrations.phase1_guard.bubbles.wait_between',side_effect=fake_interval):
+        with patch('integrations.phase1_guard.bubbles.wait_between',side_effect=fake_interval), \
+                patch('integrations.phase1_guard.bubbles.random.uniform',side_effect=[2.1,3.9]) as draw:
             await self.guard.preserve_semantic_boundaries(event);await self.guard.dispatch_text(event)
         self.assertEqual([count for count,_ in waits],[1,2])
-        self.assertTrue(all(1<=delay<=2 for _,delay in waits))
+        self.assertEqual([delay for _,delay in waits],[2.1,3.9])
+        self.assertEqual(draw.call_count,2)
         self.assertEqual(len(self.calls),3)
         self.assertEqual(self.history_text(history),'\n'.join(
             row[1]['message'][0]['data']['text'] for row in self.calls))

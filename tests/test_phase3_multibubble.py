@@ -162,10 +162,17 @@ class SemanticTests(unittest.TestCase):
 
     def test_pacing_validated_and_bounded(self):
         p=Pacing()
-        self.assertEqual((p.minimum,p.maximum),(1.0,2.0))
-        self.assertGreaterEqual(p.delay('短'),1.0);self.assertEqual(p.delay('长'*5000),2.0)
-        for args in [(-1,1),(1,.5),(0,4),(float('nan'),2),(0,float('inf'))]:
+        self.assertEqual((p.minimum,p.maximum),(2.0,4.0))
+        for _ in range(100):self.assertTrue(2.0<=p.delay('短')<=4.0)
+        for args in [(-1,1),(1,.5),(0,4.01),(float('nan'),2),(0,float('inf')),(True,4)]:
             with self.assertRaises(ValueError):Pacing(*args)
+
+    def test_pacing_draws_afresh_and_is_independent_of_text_length(self):
+        with patch('integrations.phase1_guard.bubbles.random.uniform',side_effect=[2.0,4.0,2.7]) as draw:
+            p=Pacing()
+            self.assertEqual([p.delay(t) for t in ('短','长'*5000,'短')],[2.0,4.0,2.7])
+        self.assertEqual(draw.call_args_list,[unittest.mock.call(2.0,4.0)]*3)
+        self.assertEqual(Pacing(0,0).delay('isolated fast path'),0)
 
     def test_prompt_preserves_persona_one_generation_no_forced_question(self):
         for text in ['遵循当前已加载的人格设定','简单回应可以只有一条','不意味着每轮都需要追问',
@@ -451,24 +458,55 @@ class BubbleLedgerTests(unittest.IsolatedAsyncioTestCase):
             send_part=self.part,is_current=lambda:self.current,sleep=self.sleep)
 
     async def test_first_immediate_later_bounded_and_independent_ledger(self):
-        out=await self.send()
+        with patch('integrations.phase1_guard.bubbles.random.uniform',side_effect=[2.25,3.75]) as draw:
+            out=await self.send()
         self.assertEqual(out['state'],'sent');self.assertEqual(out['sent_count'],3)
         self.assertEqual(self.calls[0],(0,0))
-        for a,b in zip(self.calls,self.calls[1:]):self.assertTrue(1.0<=b[1]-a[1]<=2.0)
+        self.assertEqual(draw.call_count,2)
+        for expected,a,b in zip((2.25,3.75),self.calls,self.calls[1:]):
+            self.assertAlmostEqual(b[1]-a[1],expected)
         self.assertEqual([r['transport_attempts'] for r in out['parts']],[1,1,1])
         self.assertTrue(all(r['finished_at'] for r in out['parts']))
         self.assertEqual(len({r['delivery_id'] for r in out['parts']}),3)
         self.assertEqual(self.store.source_ids('t1'),['m1'])
         self.assertEqual(self.store.snapshot(),self.before)
 
+    async def test_single_bubble_has_no_random_draw_or_wait(self):
+        self.texts=self.texts[:1]
+        with patch('integrations.phase1_guard.bubbles.random.uniform') as draw:
+            out=await self.send()
+        draw.assert_not_called()
+        self.assertEqual(self.calls,[(0,0)]);self.assertEqual(out['state'],'sent')
+
+    async def test_wait_and_random_draw_start_only_after_previous_confirmation(self):
+        order=[]
+        original=self.part
+        async def part(index,delivery_id):
+            order.append('attempt:'+str(index))
+            result=await original(index,delivery_id)
+            order.append('ack:'+str(index))
+            return result
+        def draw(low,high):
+            order.append('draw');self.assertEqual((low,high),(2,4));return 4
+        with patch('integrations.phase1_guard.bubbles.random.uniform',side_effect=draw):
+            await send_sequence(self.store,turn_id='t1',kind='normal',texts=self.texts,
+                send_part=part,is_current=lambda:self.current,sleep=self.sleep)
+        self.assertEqual(order,['attempt:0','ack:0','draw','attempt:1','ack:1','draw','attempt:2','ack:2'])
+
     async def test_second_failed_does_not_mark_third_sent(self):
-        self.mode='reject';out=await self.send()
+        self.mode='reject'
+        with patch('integrations.phase1_guard.bubbles.random.uniform',return_value=4) as draw:
+            out=await self.send()
+        self.assertEqual(draw.call_count,1)
         self.assertEqual([r['state'] for r in out['parts']],['sent','failed','cancelled'])
         self.assertEqual(out['delivered_text'],self.texts[0]);self.assertEqual(len(self.calls),2)
         self.assertEqual(out['parts'][2]['transport_attempts'],0)
 
     async def test_unknown_never_retries_entire_group(self):
-        self.mode='missing';out=await self.send();again=await self.send()
+        self.mode='missing'
+        with patch('integrations.phase1_guard.bubbles.random.uniform',return_value=4) as draw:
+            out=await self.send();again=await self.send()
+        self.assertEqual(draw.call_count,1)
         self.assertEqual(out,again);self.assertEqual(out['state'],'unknown')
         self.assertEqual([r['state'] for r in out['parts']],['sent','unknown','cancelled'])
         self.assertEqual(len(self.calls),2)
@@ -504,7 +542,10 @@ class BubbleLedgerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(out['state'],'unknown');self.assertEqual(out['delivered_text'],self.texts[0])
 
     async def test_interjection_during_interval_cancels_unsent(self):
-        self.stop_on_sleep=True;out=await self.send()
+        self.stop_on_sleep=True
+        with patch('integrations.phase1_guard.bubbles.random.uniform',return_value=4) as draw:
+            out=await self.send()
+        self.assertEqual(draw.call_count,1)
         self.assertEqual([r['state'] for r in out['parts']],['sent','cancelled','cancelled'])
         self.assertEqual(len(self.calls),1);self.assertLessEqual(self.clock,.1)
 

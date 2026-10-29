@@ -92,6 +92,16 @@ async def main():
                     import traceback
                     result={'pass':False,'error_type':type(exc).__name__,'trace':traceback.format_exc()}
                 (STATE/'proactive-probe.json').write_text(json.dumps(result,ensure_ascii=False))
+            flag=STATE/'autonomy-probe.flag'
+            if flag.exists():
+                flag.unlink()
+                try:
+                    from test_phase3_autonomy_native_integration import run_probe
+                    result=await asyncio.wait_for(run_probe(core,runtime),180)
+                except Exception as exc:
+                    import traceback
+                    result={'pass':False,'error_type':type(exc).__name__,'trace':traceback.format_exc()}
+                (STATE/'autonomy-probe.json').write_text(json.dumps(result,ensure_ascii=False))
             await asyncio.sleep(.2)
     probe_task=asyncio.create_task(fixture_probes())
     stop_task = asyncio.create_task(stop.wait())

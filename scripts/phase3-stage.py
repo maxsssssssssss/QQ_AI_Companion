@@ -76,7 +76,7 @@ def stage(snapshot, output, settings, *, search_key_path=None):
         "phase3_proactive_enabled": settings.get("proactive", False),
         "phase3_multibubble_enabled": True,
         "phase3_casual_split_fallback_enabled": True,
-        "phase3_bubble_min_interval": 1.0,"phase3_bubble_max_interval": 2.0,
+        "phase3_bubble_min_interval": 2.0,"phase3_bubble_max_interval": 4.0,
         "phase3_admin_id": identity["admin_id"], "phase3_platform_id": identity["platform_id"],
         "phase3_group_window": .8, "phase3_group_max_wait": 3, "phase3_group_max_messages": 8})
     write("data/config/phase3_search_config.json", {

@@ -65,7 +65,7 @@ class StagingTests(unittest.TestCase):
         runtime = json.loads((self.root / 'candidate/data/config/phase3_runtime_config.json').read_text())
         self.assertEqual(runtime['context_compression_fallback_turns'], 80)
         guard = json.loads((self.root / 'candidate/data/config/phase1_guard_config.json').read_text())
-        self.assertEqual((guard['phase3_bubble_min_interval'], guard['phase3_bubble_max_interval']), (1.0, 2.0))
+        self.assertEqual((guard['phase3_bubble_min_interval'], guard['phase3_bubble_max_interval']), (2.0, 4.0))
     def test_search_requires_separate_protected_key_without_mutating_chat_key(self):
         settings = {**self.settings, 'search': True}
         with self.assertRaises(ValueError): stage.stage(self.snapshot, self.root / 'missing', settings)

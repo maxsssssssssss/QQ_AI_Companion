@@ -130,6 +130,53 @@ class RelaxedPublicURLTests(unittest.IsolatedAsyncioTestCase):
         for url in ("https://public.example.org/article?id=12345&page=2", "https://public.example.org/search?q=token%20pricing&lang=zh-CN", "https://public.example.org/search?q=C%2B%2B", "https://public.example.org/a?code=python"):
             with self.subTest(url=url): self.assertEqual(await self.policy.url(url), url)
 
+    async def test_once_encoded_ascii_path_spaces_preserve_exact_url(self):
+        for path in ("/a%20b.pdf", "/Research%20Paper%20-%202025.pdf", "/two%20%20spaces.pdf"):
+            url = "https://public.example.org" + path + "?page=2"
+            with self.subTest(path=path):
+                self.assertEqual(await self.policy.url(url), url)
+                self.assertEqual(await self.policy.arguments(FETCH, {"url": url}), {"url": url})
+
+    async def test_path_space_exception_does_not_allow_literal_or_other_whitespace(self):
+        for middle in (" ", "\t", "\n", "%09", "%0A", "%0D", "%00", "%7F", "%C2%85", "%C2%A0", "%E3%80%80"):
+            with self.subTest(middle=middle), self.assertRaises(Rejected):
+                await self.policy.url("https://public.example.org/a" + middle + "b.pdf")
+
+    async def test_nested_space_encoding_is_not_the_path_space_exception(self):
+        for path in ("/a%2520b", "/a%252520b", "/a%25%32%30b", "/a%20b%2520c"):
+            with self.subTest(path=path), self.assertRaisesRegex(Rejected, "unsafe_url"):
+                await self.policy.url("https://public.example.org" + path)
+
+    async def test_path_space_exception_does_not_enable_path_delimiters_or_backslash(self):
+        for path in ("/a%20b%3Ftoken=x", "/a%20b%23fragment", "/a%20b%5Cc", "/a%20b%255Cc", "/a%20b\\c"):
+            with self.subTest(path=path), self.assertRaises(Rejected):
+                await self.policy.url("https://public.example.org" + path)
+
+    async def test_path_space_exception_keeps_privacy_checks_before_dns(self):
+        calls = []
+        async def resolver(host):
+            calls.append(host)
+            return ("1.1.1.1",)
+        policy = PublicPolicy(scope="general_public", resolver=resolver)
+        for path in ("/a%20b?token=synthetic", "/Bearer%20abcdefghijklmnop", "/synthetic%20private"):
+            with self.subTest(path=path), self.assertRaisesRegex(Rejected, "private_url"):
+                await policy.url("https://public.example.org" + path, protected_values=("synthetic private",))
+        self.assertEqual(calls, [])
+
+    async def test_path_space_exception_keeps_nonpublic_and_mixed_dns_blocked(self):
+        for addresses in (("127.0.0.1",), ("1.1.1.1", "10.1.2.3"), ("::1",)):
+            async def resolver(host):return addresses
+            policy = PublicPolicy(scope="general_public", resolver=resolver)
+            with self.subTest(addresses=addresses), self.assertRaisesRegex(Rejected, "nonpublic_address"):
+                await policy.url("https://public.example.org/a%20b.pdf")
+
+    async def test_reviewed_path_spaces_still_require_approved_host(self):
+        policy = PublicPolicy(fetch_hosts=["public.example.org"], resolver=public_dns)
+        url = "https://public.example.org/a%20b.pdf"
+        self.assertEqual(await policy.url(url), url)
+        with self.assertRaisesRegex(Rejected, "unreviewed_fetch_host"):
+            await policy.url("https://other.example.org/a%20b.pdf")
+
     async def test_anchor_is_removed_without_changing_query(self):
         self.assertEqual(await self.policy.url("https://public.example.org/a?id=12#details"), "https://public.example.org/a?id=12")
 

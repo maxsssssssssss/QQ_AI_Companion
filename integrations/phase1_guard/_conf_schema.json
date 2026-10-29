@@ -56,13 +56,13 @@
   },
   "phase3_bubble_min_interval": {
     "type": "float",
-    "description": "Minimum seconds between later bubbles. First bubble has no added wait.",
-    "default": 1.0
+    "description": "Lower bound of a fresh uniform random wait after each confirmed bubble. First bubble has no added wait.",
+    "default": 2.0
   },
   "phase3_bubble_max_interval": {
     "type": "float",
-    "description": "Maximum seconds between bubbles (validated at most 3).",
-    "default": 2.0
+    "description": "Upper bound of the random inter-bubble wait (validated at most 4 seconds). Existing interruption and confirmation rules remain in effect.",
+    "default": 4.0
   },
   "phase3_plain_text_enabled": {
     "type": "bool",

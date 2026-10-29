@@ -4,6 +4,7 @@ This executes original candidate creation, delivery identity and two-level
 generation methods. The timer loop and provider are fixtures, not real QQ/API.
 """
 import asyncio
+from contextvars import ContextVar
 from datetime import datetime
 import importlib
 import json
@@ -126,6 +127,192 @@ class NativeProactiveTests(unittest.IsolatedAsyncioTestCase):
         self.bridge.detach()
         self.gate.close()
         self.temp.cleanup()
+
+    async def test_full_text_scope_keeps_long_line_and_all_native_lines(self):
+        lines=['第'+str(n)+'段讨论标点与节奏，'+('每个位置都有不同的表达价值，'*14)+'最后保留此段内容。'
+               for n in range(1,7)]
+        token=self.bridge._semantic_scope.set(True)
+        try:
+            cleaned=self.private._sanitize_proactive_text('\n'.join(lines))
+            normalized=self.private._normalize_proactive_sentence_flow(cleaned)
+        finally:self.bridge._semantic_scope.reset(token)
+        self.assertGreater(len(normalized),1000)
+        self.assertEqual(cleaned,'\n'.join(lines).removesuffix('。'))
+        for line in lines:self.assertIn(line.removesuffix('。'),normalized)
+        self.assertNotIn('…',normalized)
+
+    async def test_full_text_scope_native_hidden_blocks_and_line_rejections_stay_removed(self):
+        text=('第一段正文。\n<pc_history_media>\n不可展示的内部资料\n不能恢复这一行\n'
+              '</pc_history_media>\n直接输出这条主动消息\n（翻了个身）\n最后一段正文。')
+        token=self.bridge._semantic_scope.set(True)
+        try:cleaned=self.private._sanitize_proactive_text(text)
+        finally:self.bridge._semantic_scope.reset(token)
+        self.assertIn('第一段正文',cleaned);self.assertIn('最后一段正文',cleaned)
+        for removed in ('内部资料','恢复这一行','pc_history_media','直接输出','翻了个身'):
+            self.assertNotIn(removed,cleaned)
+
+    async def test_semantic_sanitize_removes_complete_hidden_blocks_before_restoring_boundaries(self):
+        self.guard.multibubble_enabled=True;marker='<<PRIVATE_COMPANION_SPLIT>>'
+        text=('第一条允许正文。\n'+marker+'\n<pc_history_media>\n隐藏原文\n'+marker+
+              '\n隐藏尾部\n</pc_history_media>\n第二条允许正文。\n'+marker+'\n第三条允许正文。')
+        token=self.bridge._semantic_scope.set(True)
+        try:cleaned=self.private._sanitize_proactive_text(text)
+        finally:self.bridge._semantic_scope.reset(token)
+        parts,controlled=message.split_llm_controlled_text(cleaned)
+        self.assertTrue(controlled);self.assertEqual(len(parts),3)
+        self.assertEqual(cleaned.count(marker),2)
+        for forbidden in ('隐藏','pc_history_media','PHASE3_BOUNDARY'):
+            self.assertNotIn(forbidden,cleaned)
+
+    async def test_full_text_scope_keeps_native_closing_topic_guard(self):
+        token=self.bridge._semantic_scope.set(True)
+        try:
+            cleaned=self.private._normalize_proactive_sentence_flow('先到这里，晚安。今天突然觉得云层很有趣。')
+        finally:self.bridge._semantic_scope.reset(token)
+        self.assertIn('晚安',cleaned);self.assertNotIn('云层',cleaned)
+
+    async def test_full_text_scope_does_not_change_native_cleanup_outside_generation(self):
+        text='合成正文内容'*100
+        self.assertLessEqual(len(self.private._sanitize_proactive_text(text)),261)
+        token=self.bridge._semantic_scope.set(True)
+        try:self.assertEqual(self.private._sanitize_proactive_text(text),text)
+        finally:self.bridge._semantic_scope.reset(token)
+        self.assertLessEqual(len(self.private._sanitize_proactive_text(text)),261)
+
+    async def test_short_proactive_normalization_still_uses_original_layout(self):
+        text='标点还有这种用法。第二句可以换个重心。第三句就说到这里'
+        expected=self.private._normalize_proactive_sentence_flow(text)
+        token=self.bridge._semantic_scope.set(True)
+        try:self.assertEqual(self.private._normalize_proactive_sentence_flow(text),expected)
+        finally:self.bridge._semantic_scope.reset(token)
+
+    async def test_cleanup_does_not_run_guard_fallback_inside_a_model_bubble(self):
+        self.guard.multibubble_enabled=True
+        def forbidden_fallback(*args,**kwargs):
+            raise AssertionError('Guard fallback belongs only to final delivery')
+        self.guard.semantic_parts=forbidden_fallback
+        text='这一段已经是模型选择的气泡。不能在清理里再次切它。'
+        expected=self.private._normalize_proactive_sentence_flow(text)
+        token=self.bridge._semantic_scope.set(True)
+        try:
+            self.assertEqual(self.private._normalize_proactive_sentence_flow(text),expected)
+            marked=text+'\n<<PRIVATE_COMPANION_SPLIT>>\n第二个模型气泡。'
+            cleaned=self.private._visible_text_without_tts_reading(marked)
+            self.assertEqual(cleaned.count('<<PRIVATE_COMPANION_SPLIT>>'),1)
+        finally:self.bridge._semantic_scope.reset(token)
+
+    def local_review(self,text):
+        return self.private._local_proactive_send_decision(self.private.user,text,
+            reason='activity_share',action='message',motive='开放选题',topic='合成话题')
+
+    async def test_autonomy_hypothetical_consequence_does_not_waive_real_action_checks(self):
+        from integrations.phase3_runtime.autonomy import AutonomousProactiveBridge
+        original=self.private._unverified_proactive_fact_decision
+        scope={'decision':{'kind':'hypothesis'}}
+        shim=types.SimpleNamespace(_additional_bindings={'_unverified_proactive_fact_decision':original},
+            _native_gate_scope=ContextVar('test_final_gate',default=scope),
+            _semantic_scope=ContextVar('test_semantic',default=True))
+        kwargs={'reason':'activity_share','action':'message','action_context':''}
+        for text in ('假设两个虚构角色共用一张地图，可能聊到一半才发现坐标原点不同。',
+                     '也许它们争论到最后才发现说的根本不是同一种虚构颜色。'):
+            self.assertIsNotNone(original(text,**kwargs))
+            self.assertIsNone(AutonomousProactiveBridge.review_native_recent_fact(shim,text,**kwargs))
+        for text in ('可能我昨晚才发现坐标不同。',
+                     '可能吵到一半才发现概念不同。我刚看到窗外有东西。',
+                     '可能吵到一半才发现概念不同，我刚查到一条新闻。',
+                     '我刚刚发现了一个新现象。',
+                     '他们吵到一半才发现概念不同。'):
+            expected=original(text,**kwargs)
+            self.assertIsNotNone(expected)
+            self.assertEqual(AutonomousProactiveBridge.review_native_recent_fact(shim,text,**kwargs),expected)
+        scope['decision']['kind']='opinion'
+        text='可能它们吵到一半才发现坐标不同。'
+        self.assertEqual(AutonomousProactiveBridge.review_native_recent_fact(shim,text,**kwargs),original(text,**kwargs))
+
+    async def test_native_local_motive_cleaner_cannot_eat_a_valid_marker_suffix(self):
+        self.guard.multibubble_enabled=True
+        marker='<<PRIVATE_COMPANION_SPLIT>>'
+        text=('模块化积木看起来挺有趣。\n'+marker+'\n'
+              '我想了半天，连接方式比外形更值得琢磨。\n'+marker+'\n'
+              '每块积木之间的约定才是关键。')
+        # Reproduce the fixed upstream bug: _single_line moves the marker next
+        # to a motive phrase; the native look-behind-like regex eats its suffix.
+        broken=self.local_review(text)
+        self.assertEqual(broken['decision'],'rewrite')
+        self.assertIn('<<PRIVATE_COMPANI，',broken['text'])
+        token=self.bridge._semantic_scope.set(True)
+        try:
+            repaired=self.local_review(text)
+            accepted=self.private._normalize_proactive_review_decision_policy(
+                self.private.user,repaired,strength='lenient',source='local',
+                reason='activity_share',action='message',original_text=text)
+        finally:self.bridge._semantic_scope.reset(token)
+        self.assertEqual(accepted['decision'],'rewrite')
+        self.assertEqual(accepted['text'].count(marker),2)
+        self.assertNotIn('我想了半天',accepted['text'])
+        self.assertEqual(repaired['decision'],'rewrite')
+        parts,controlled=message.split_llm_controlled_text(repaired['text'])
+        self.assertTrue(controlled);self.assertEqual(len(parts),3)
+        self.assertEqual(repaired['text'].count(marker),2)
+        self.assertNotIn('我想了半天',repaired['text'])
+        self.assertIn('连接方式比外形更值得琢磨',parts[1])
+        self.assertIn('每块积木之间的约定才是关键',parts[2])
+        self.assertFalse(any('PRIVATE_COMPANI' in part for part in parts))
+
+    async def test_local_marked_cleanup_retains_seven_hundred_character_complete_body(self):
+        self.guard.multibubble_enabled=True;marker='<<PRIVATE_COMPANION_SPLIT>>'
+        parts=[('第'+str(n)+'段的合成观点，'+('词语的位置会影响句子的阅读节奏，'*14)+'末尾完整。')
+               for n in range(1,4)]
+        parts[1]='我想了半天，'+parts[1]
+        self.assertTrue(all(len(x)<=260 for x in parts))
+        text=('\n'+marker+'\n').join(parts);self.assertGreater(len(text),700)
+        token=self.bridge._semantic_scope.set(True)
+        try:result=self.local_review(text)
+        finally:self.bridge._semantic_scope.reset(token)
+        self.assertEqual(result['decision'],'rewrite')
+        parsed,controlled=message.split_llm_controlled_text(result['text'])
+        self.assertTrue(controlled);self.assertEqual(len(parsed),3)
+        self.assertEqual(parsed[0],parts[0]);self.assertEqual(parsed[2],parts[2])
+        expected=self.bridge._additional_bindings['_strip_proactive_motive_leak_text'](parts[1])
+        self.assertEqual(parsed[1],expected)
+        self.assertGreater(len(result['text']),700)
+
+    async def test_local_unmarked_long_send_keeps_original_and_checks_tail_hard_blocks(self):
+        self.guard.multibubble_enabled=True
+        text='我更喜欢在句子里留一点变化。'+('词语的位置会影响阅读节奏。'*65)+'末尾完整。'
+        self.assertGreater(len(text),700)
+        token=self.bridge._semantic_scope.set(True)
+        try:
+            self.assertEqual(self.local_review(text)['decision'],'send')
+            blocked=self.local_review(text+'以后我会提醒你该休息了。')
+        finally:self.bridge._semantic_scope.reset(token)
+        self.assertEqual(blocked['decision'],'drop');self.assertTrue(blocked['hard'])
+        self.assertIn('未来提醒',blocked['reason'])
+
+    async def test_local_overlong_rewrite_preview_or_native_clipped_motive_is_not_delivered(self):
+        self.guard.multibubble_enabled=True
+        body=('这种表达里的细节都应该留下，'*55)+'最后不能丢。'
+        token=self.bridge._semantic_scope.set(True)
+        try:
+            clipped=self.local_review('好呀，'+body)
+            motive=self.local_review('我想了半天，'+body)
+        finally:self.bridge._semantic_scope.reset(token)
+        self.assertEqual(clipped['decision'],'drop');self.assertIn('预览',clipped['reason'])
+        self.assertEqual(motive['decision'],'drop');self.assertIn('完整正文',motive['reason'])
+        self.assertFalse(clipped.get('text'));self.assertFalse(motive.get('text'))
+
+    async def test_local_marker_adapter_retains_native_hard_rejection_and_does_not_restore_removed_bubble(self):
+        self.guard.multibubble_enabled=True;marker='<<PRIVATE_COMPANION_SPLIT>>'
+        token=self.bridge._semantic_scope.set(True)
+        try:
+            rejected=self.local_review('普通正文。\n'+marker+'\n以后我会告诉你下一次更新时间。')
+            removed=self.local_review('第一条留下。\n'+marker+'\n我想了半天。\n'+marker+'\n最后一条留下。')
+        finally:self.bridge._semantic_scope.reset(token)
+        self.assertEqual(rejected['decision'],'drop');self.assertTrue(rejected['hard'])
+        self.assertEqual(removed['decision'],'rewrite')
+        parts,controlled=message.split_llm_controlled_text(removed['text'])
+        self.assertTrue(controlled);self.assertEqual(len(parts),2)
+        self.assertNotIn('想了半天',removed['text'])
 
     async def test_native_candidate_generation_delivery_and_unique_receipt(self):
         candidate = self.private._planned_proactive_impulse(self.private.user)

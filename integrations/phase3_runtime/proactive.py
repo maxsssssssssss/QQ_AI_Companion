@@ -292,7 +292,9 @@ class ProactiveGate:
         self.set_control("blocked:" + topic_id, "1")
 
     def permit(self, session, *, candidate_id, topic_id="", event_state="", source="conversation", source_verified=False, busy=False,
-               last_user_reply_at=0):
+               last_user_reply_at=0, purpose='send', supplement=False, topic_cooldown=True):
+        if purpose not in {'send', 'explore'} or type(supplement) is not bool or type(topic_cooldown) is not bool:
+            return 'invalid_admission_purpose'
         now = self.clock()
         if not self.enabled or session != self.session:
             return "not_authorized"
@@ -304,7 +306,7 @@ class ProactiveGate:
             return "event_not_due"
         if topic_id and self._get("blocked:" + topic_id):
             return "topic_suppressed"
-        if topic_id:
+        if topic_id and topic_cooldown:
             spoken_at = float(self._get('spoken:'+topic_id, '0'))
             if spoken_at and last_user_reply_at <= spoken_at and now-spoken_at < 86400:
                 return 'unanswered_same_topic'
@@ -323,7 +325,8 @@ class ProactiveGate:
         day = local.date().isoformat()
         rows = self.db.execute("SELECT attempted FROM proactive_attempts WHERE day=?", (day,)).fetchall()
         last = self.db.execute("SELECT MAX(attempted) FROM proactive_attempts").fetchone()[0]
-        if len(rows) >= self.limit or last is not None and now - last < self.cooldown:
+        if purpose == 'send' and (len(rows) >= self.limit or
+                not supplement and last is not None and now - last < self.cooldown):
             return "budget_or_cooldown"
         return "allowed"
 
@@ -437,6 +440,8 @@ class NativeProactiveBridge:
         self._active_generations = {}
         self._decisions = {}
         self._semantic_scope = ContextVar('phase3_proactive_semantic_scope',default=False)
+        self._full_text_scope = ContextVar('phase3_proactive_full_text_scope', default=False)
+        self._local_review_scope = ContextVar('phase3_proactive_local_review_scope', default=None)
         self._native_settings_active = False
         self._native_settings_before = {}
         self.metrics = {"generation_attempts": 0, "generation_blocked": 0, "generation_errors": 0,
@@ -467,9 +472,15 @@ class NativeProactiveBridge:
                                ("_reason_windows", self.reason_windows),
                                ("_mark_planned_candidate_status", self.mark_candidate_status),
                                ("_proactive_llm_segmenting_allowed", self.semantic_proactive_allowed),
+                               ("_finalize_proactive_generated_text", self.finalize_semantic_text),
+                               ("_local_proactive_send_decision", self.local_semantic_send_decision),
+                               ("_strip_proactive_motive_leak_text", self.strip_semantic_motive_leak),
+                               ("_sanitize_proactive_text", self.sanitize_semantic_text),
+                               ("_truncate_proactive_text", self.truncate_semantic_text),
                                ("_visible_text_without_tts_reading", self.visible_semantic_text),
                                ("_normalize_proactive_sentence_flow", self.normalize_semantic_text),
                                ("_remove_unbacked_media_claims", self.remove_semantic_media_claims),
+                               ("_sanitize_action_boundaries", self.action_semantic_text),
                                ("_maybe_run_pre_message_poke", self.pre_message_poke)):
             original = getattr(self.private, name, None)
             if callable(original):
@@ -515,25 +526,210 @@ class NativeProactiveBridge:
             self.metrics[field]=self.metrics.get(field,0)+1
         if not self._semantic_scope.get() or not getattr(self.guard,'multibubble_enabled',False):
             return original(text,**kwargs)
-        from astrbot.api.event import MessageEventResult
+        if not marked:
+            return original(text,**kwargs)
         from ..phase1_guard.bubbles import MARKER
-        parts=self.guard.semantic_parts(MessageEventResult().message(str(text or '')))
-        if marked:self.metrics['semantic_last_part_count']=len(parts)
-        if len(parts)<2:return original(text,**kwargs)
-        # Preserve boundaries while still applying each original cleanup. Never
-        # reinsert raw text removed by a later safety filter or exceed its cap.
-        remaining=int(kwargs.get('limit',260));cleaned=[]
+        native_globals=getattr(getattr(original,'__func__',original),'__globals__',{})
+        split=native_globals.get('split_llm_controlled_text')
+        parts,controlled=split(text) if callable(split) else ([str(text or '')],False)
+        self.metrics['semantic_last_part_count']=len(parts)
+        if not controlled:return original(text,**kwargs)
+        # These are transport boundaries, not a second 260-character budget.
+        # Each value still comes from the native cleanup; never reinsert text
+        # removed by that cleanup or a later content/safety check.
+        cleaned=[]
         for part in parts:
-            if remaining<=0:break
-            value=str(original(part.get_plain_text(),**kwargs) or '')[:remaining].strip()
-            if value:cleaned.append(value);remaining-=len(value)
+            value=str(original(part,**kwargs) or '').strip()
+            if value:cleaned.append(value)
+        return ('\n'+MARKER+'\n').join(cleaned)
+
+    def local_semantic_send_decision(self,user,text,**kwargs):
+        original=self._additional_bindings['_local_proactive_send_decision']
+        if (not self._semantic_scope.get() or user.get('umo')!=self.gate.session
+                or not getattr(self.guard,'multibubble_enabled',False)):
+            return original(user,text,**kwargs)
+        native_globals=getattr(getattr(original,'__func__',original),'__globals__',{})
+        split=native_globals.get('split_llm_controlled_text')
+        single_line=native_globals.get('_single_line')
+        if not callable(split) or not callable(single_line):
+            return original(user,text,**kwargs)
+        parts,controlled=split(text)
+        source=str(text or '').strip()
+        # The fixed local reviewer flattens a 500-character preview. Keep its
+        # policy unchanged, but give its motive cleaner the already-parsed
+        # complete bodies so a regex cannot consume a control-marker suffix.
+        frame={'preview':single_line(source,500),
+               'parts':parts if controlled else [source],
+               'full_rewrite':False,'unsafe':False}
+        token=self._local_review_scope.set(frame)
+        try:
+            result=original(user,text,**kwargs)
+        finally:
+            self._local_review_scope.reset(token)
+        if frame['unsafe']:
+            return {'decision':'drop','hard':True,
+                    'reason':'本地动机清理无法可靠保留完整正文，取消截断候选'}
+        flat=single_line(source,max(len(source),500))
+        if len(flat)>500:
+            # The original preview cannot validate a long tail. Reuse the same
+            # native hard checks on overlapping views, without sending them or
+            # turning them into bubbles. A requested tail rewrite is not proof
+            # of a complete safe rewrite, so fail closed in that case.
+            for start in range(250,len(flat),250):
+                tail=original(user,flat[start:start+500],**kwargs)
+                if tail.get('hard') and tail.get('decision') in {'drop','defer','rewrite'}:
+                    return {'decision':'drop','hard':True,
+                            'reason':tail.get('reason') or '完整正文尾部未通过原生检查'}
+            if result.get('decision')=='rewrite' and not frame['full_rewrite']:
+                return {'decision':'drop','hard':True,
+                        'reason':'本地改写仅覆盖预览，取消不完整正文'}
+        return result
+
+    def strip_semantic_motive_leak(self,text):
+        original=self._additional_bindings['_strip_proactive_motive_leak_text']
+        frame=self._local_review_scope.get()
+        if frame is None or str(text or '')!=frame['preview']:
+            return original(text)
+        cleaned=[];changed=False
+        for part in frame['parts']:
+            value=str(original(part) or '').strip()
+            if value!=part:
+                # This native cleaner has an internal hard [:260] ceiling.
+                # Do not recover deleted text or silently emit a partial body.
+                if len(part)>260:
+                    frame['unsafe']=True
+                    return ''
+                changed=True
+            if value:cleaned.append(value)
+        if not changed:
+            return text
+        frame['full_rewrite']=True
+        self.metrics['semantic_motive_rewrites']=self.metrics.get('semantic_motive_rewrites',0)+1
+        from ..phase1_guard.bubbles import MARKER
         return ('\n'+MARKER+'\n').join(cleaned)
 
     def visible_semantic_text(self,text,*,limit=1000):
+        if self._semantic_scope.get():
+            limit=max(limit,len(str(text or '')))
         return self._transform_semantic_text('_visible_text_without_tts_reading',text,limit=limit)
 
     def normalize_semantic_text(self,text):
+        if self._semantic_scope.get():
+            source=str(text or '')
+            units=[unit for line in source.splitlines()
+                   for unit in self.private._split_proactive_sentence_units(line) if unit.strip()]
+            if len(source)<=260 and len(units)<=4:
+                return self._transform_semantic_text('_normalize_proactive_sentence_flow',source)
+            # The pinned normalizer combines safety/content edits with a display
+            # budget (four sentences / 260 chars). Keep its native content edits
+            # on the complete approved text; omit only the layout/budget pass.
+            value=self.private._strip_unsupported_proactive_agreement(source)
+            return self.private._trim_abrupt_closing_topic_shift(value)
         return self._transform_semantic_text('_normalize_proactive_sentence_flow',text)
+
+    def truncate_semantic_text(self,text,limit=260):
+        if self._full_text_scope.get():
+            return str(text or '').strip()
+        return self._additional_bindings['_truncate_proactive_text'](text,limit)
+
+    def sanitize_semantic_text(self,text):
+        original=self._additional_bindings['_sanitize_proactive_text']
+        if not self._semantic_scope.get():
+            return original(text)
+        # Strip complete internal blocks BEFORE batching native line cleanup,
+        # so a multiline hidden block cannot be exposed by splitting it. Invoke
+        # the locked implementation, rather than copying its rules or restoring
+        # the original reply after a native rejection.
+        native_globals=getattr(getattr(original,'__func__',original),'__globals__',{})
+        strip_blocks=native_globals.get('_strip_internal_message_blocks')
+        setting=native_globals.get('runtime_persona_setting')
+        if not callable(strip_blocks) or not callable(setting):
+            return original(text)
+        source=str(text or '')
+        split=native_globals.get('split_llm_controlled_text')
+        _,controlled=split(source) if callable(split) else ([],False)
+        from ..phase1_guard.bubbles import MARKER
+        # The native internal-tag registry also removes valid split markers.
+        # Protect only exact standalone boundary lines while running its FULL
+        # block remover first. A boundary inside a rejected block disappears
+        # with that block; no removed body is recovered from the raw reply.
+        placeholder='\x00PHASE3_BOUNDARY_'+uuid.uuid4().hex+'\x00'
+        if controlled:
+            source=re.sub(r'(?m)^[ \t]*'+re.escape(MARKER)+r'[ \t]*$',placeholder,source)
+        cleaned=strip_blocks(source,
+            enabled=bool(setting(self.private,'enable_framework_error_leak_guard',True)),
+            tts_enabled=bool(setting(self.private,'enable_tts_enhancement',False)))
+        if controlled:
+            cleaned=cleaned.replace(placeholder,MARKER)
+            parts,retained=split(cleaned)
+            if retained:
+                values=[self.sanitize_semantic_text(part) for part in parts]
+                return ('\n'+MARKER+'\n').join(value for value in values if value)
+        lines=cleaned.splitlines()
+        token=self._full_text_scope.set(True)
+        try:
+            # Native's per-line instruction/identity/stage-direction filtering
+            # remains authoritative. Three-line batches remove only its lines[:3]
+            # display ceiling; these batches never become extra QQ bubbles.
+            values=[]
+            for start in range(0,len(lines),3):
+                chunk='\n'.join(lines[start:start+3])
+                value=str(original(chunk) or '').strip()
+                # The native terminal-period presentation rule belongs only to
+                # the actual last batch. Preserve an INTERNAL period solely when
+                # exact equality proves that nothing else was removed/rewritten.
+                if start+3<len(lines) and chunk.strip()==value+'。':value+='。'
+                if value:values.append(value)
+            return '\n'.join(values)
+        finally:
+            self._full_text_scope.reset(token)
+
+    async def finalize_semantic_text(self,user,raw_text,**kwargs):
+        original=self._additional_bindings['_finalize_proactive_generated_text']
+        if not self._semantic_scope.get() or user.get('umo') != self.gate.session:
+            return await original(user,raw_text,**kwargs)
+        native_globals=getattr(getattr(original,'__func__',original),'__globals__',{})
+        split=native_globals.get('split_llm_controlled_text')
+        parts,controlled=split(raw_text) if callable(split) else ([raw_text],False)
+        if not controlled:
+            value,failure=await original(user,raw_text,**kwargs)
+            rejected=self._long_native_content_failure(user,value,kwargs) if callable(split) else ''
+            return ('',rejected) if rejected else (value,failure)
+        # Run the entire original non-segment finalizer for EVERY model bubble.
+        # Bypass only its aggregate 260-character branch, without adding bubbles
+        # or restoring any address/action/relay/provider-rejected content.
+        from ..phase1_guard.bubbles import MARKER
+        kept=[];failures=[]
+        for part in parts:
+            value,failure=await original(user,part,**kwargs)
+            rejected=self._long_native_content_failure(user,value,kwargs)
+            if rejected:value,failure='',rejected
+            if value:kept.append(value)
+            elif failure:failures.append(failure)
+        if kept:return ('\n'+MARKER+'\n').join(kept),''
+        return '',('；'.join(failures)[:240] or '自主分段正文处理后为空')
+
+    def _long_native_content_failure(self,user,text,kwargs):
+        # Some original predicates inspect only 260/600/1000 characters because
+        # their original caller had already capped the body at 260. Reuse those
+        # same predicates over overlapping views of the CLEANED result so a long
+        # tail cannot bypass them. These views do not alter text or bubble count.
+        text=str(text or '')
+        if len(text)<=260:return ''
+        for start in range(0,len(text),160):
+            view=text[start:start+260]
+            if self.private._looks_like_internal_provider_error_text(view):
+                return 'Provider/API 错误正文'
+            if self.private._is_proactive_instruction_leak_text(view):
+                return '主动正文含内部指令'
+            wrong=self.private._wrong_proactive_recipient_address(view,user,kwargs.get('name',''))
+            if wrong:return '含其他用户专属称呼：'+str(wrong)[:80]
+            relay=self.private._unexecuted_relay_claim_reason(view,action_context=kwargs.get('action_context',''))
+            if relay:return '含未执行转述承诺：'+str(relay)[:80]
+        return ''
+
+    def action_semantic_text(self,text,**kwargs):
+        return self._transform_semantic_text("_sanitize_action_boundaries",text,**kwargs)
 
     def remove_semantic_media_claims(self,text):
         return self._transform_semantic_text('_remove_unbacked_media_claims',text)
@@ -696,7 +892,8 @@ class NativeProactiveBridge:
                 # candidate, generation, send attempt or quota reservation.
                 admission = self.gate.permit(self.gate.session,
                     candidate_id='phase3_local_plan_maintenance', source='want_to_chat',
-                    busy=self.guard.session_busy(self.gate.session))
+                    busy=self.guard.session_busy(self.gate.session),
+                    purpose='explore' if getattr(self, 'autonomy_enabled', False) else 'send')
                 if admission != 'allowed':
                     return self._plan_observation(admission, user=user)
                 if self.gate.session in self._active_generations:

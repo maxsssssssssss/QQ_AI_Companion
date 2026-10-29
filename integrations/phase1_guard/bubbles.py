@@ -8,6 +8,7 @@ import asyncio
 from dataclasses import dataclass
 import hashlib
 import math
+import random
 import re
 import unicodedata
 import uuid
@@ -311,12 +312,15 @@ def semantic_text(parser,text,*,enabled=True,fallback_enabled=False,allow_fallba
 
 @dataclass(frozen=True)
 class Pacing:
-    minimum:float=1.0
-    maximum:float=2.0
+    minimum:float=2.0
+    maximum:float=4.0
     def __post_init__(self):
-        if not all(type(v) in (int,float) and math.isfinite(v) for v in (self.minimum,self.maximum)) or not 0<=self.minimum<=self.maximum<=3:
+        if not all(type(v) in (int,float) and math.isfinite(v) for v in (self.minimum,self.maximum)) or not 0<=self.minimum<=self.maximum<=4:
             raise ValueError('invalid_bubble_pacing')
-    def delay(self,text):return min(self.maximum,self.minimum+len(text)/120)
+    def delay(self,text):
+        # Draw once for each later bubble, after the preceding send is confirmed.
+        # Text length does not affect pacing; the existing wait remains interruptible.
+        return random.uniform(self.minimum,self.maximum)
 
 
 async def wait_between(delay,is_current,*,sleep=asyncio.sleep):

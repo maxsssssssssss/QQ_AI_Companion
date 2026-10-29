@@ -181,5 +181,63 @@
         "default": 6
       }
     }
+  },
+  "proactive_autonomy": {
+    "type": "object",
+    "description": "Opt-in native proactive autonomy. Exploration and send permissions are separate; these do not rewrite proactive_window or passive search quotas.",
+    "items": {
+      "enabled": {
+        "type": "bool",
+        "default": false
+      },
+      "exploration": {
+        "type": "bool",
+        "default": true
+      },
+      "self_preferences": {
+        "type": "bool",
+        "default": true
+      },
+      "supplements": {
+        "type": "bool",
+        "default": true
+      },
+      "model_requests_per_day": {
+        "type": "int",
+        "default": 144
+      },
+      "tool_attempts_per_day": {
+        "type": "int",
+        "default": 288
+      },
+      "tools_per_opportunity": {
+        "type": "int",
+        "default": 3
+      },
+      "exploration_seconds": {
+        "type": "int",
+        "default": 600
+      },
+      "audit_retention_days": {
+        "type": "int",
+        "default": 14
+      },
+      "audit_capacity_bytes": {
+        "type": "int",
+        "default": 67108864
+      },
+      "pocket_limit": {
+        "type": "int",
+        "default": 64
+      },
+      "supplement_min_seconds": {
+        "type": "int",
+        "default": 300
+      },
+      "supplement_max_seconds": {
+        "type": "int",
+        "default": 3600
+      }
+    }
   }
 }

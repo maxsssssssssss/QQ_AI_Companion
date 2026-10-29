@@ -3,7 +3,9 @@ import asyncio
 from datetime import datetime, timezone
 from dataclasses import replace
 import importlib
+import hashlib
 import json
+import os
 from pathlib import Path
 
 from astrbot.api import AstrBotConfig, logger
@@ -12,7 +14,7 @@ from astrbot.api.star import Context, Star, StarTools
 from astrbot.core.utils.astrbot_path import get_astrbot_data_path
 
 from .persona import render_persona
-from .settings import validate_settings
+from .settings import validate_settings, AUTONOMY_DEFAULTS
 from .recall import append_guidance, available_topics
 from .profile_recall import recall_profile
 from .profile_publication import publish_profile
@@ -29,6 +31,7 @@ class Phase3Runtime(Star):
         self.ready = False
         self.prepared = False
         self.guard = self.memory = self.proactive = self.proactive_bridge = None
+        self.self_preferences = self.autonomy_state = None
         self.persona_prompt = ""
         self.identities, self.tasks = {}, set()
         self.memory_wake = asyncio.Event()
@@ -101,7 +104,26 @@ class Phase3Runtime(Star):
             self.proactive = ProactiveGate(StarTools.get_data_dir("phase3_runtime") / "proactive-controls.sqlite3",
                 allowed_session=f"{self.platform_id}:FriendMessage:{self.admin_id}", enabled=False,
                 **self.settings.get("proactive_window", {}))
-            self.proactive_bridge = NativeProactiveBridge(private.star_cls, self.guard, self.proactive, module._ProactiveSendOutcome,
+            options = {**AUTONOMY_DEFAULTS, **self.settings.get('proactive_autonomy', {})}
+            bridge_type, extra = NativeProactiveBridge, {}
+            if options['enabled']:
+                from .autonomy import AutonomousProactiveBridge
+                from .autonomy_state import AutonomyState
+                self.autonomy_state = AutonomyState(self.proactive.db, clock=self.proactive.clock,
+                    audit_dir=StarTools.get_data_dir('phase3_runtime') / 'private-autonomy-audit',
+                    model_limit=options['model_requests_per_day'], tool_limit=options['tool_attempts_per_day'],
+                    tools_per_opportunity=options['tools_per_opportunity'], exploration_seconds=options['exploration_seconds'],
+                    pocket_limit=options['pocket_limit'], retention_days=options['audit_retention_days'],
+                    audit_capacity_bytes=options['audit_capacity_bytes'])
+                if options['self_preferences']:
+                    from ..phase3_memory.self_preferences import NativeSelfPreferences
+                    self.self_preferences = NativeSelfPreferences(private.star_cls,self.guard,
+                        allowed_session=self.proactive.session,wake=self.memory_wake)
+                bridge_type = AutonomousProactiveBridge
+                extra = {'autonomy_state':self.autonomy_state, 'autonomy_settings':options,
+                         'self_preferences':self.self_preferences, 'search_factory':self._autonomy_search}
+            self.proactive_bridge = bridge_type(private.star_cls, self.guard, self.proactive, module._ProactiveSendOutcome,
+                **extra,
                 history_policy=self.settings.get("proactive_history"),
                 event_source=self._proactive_events, event_resolver=self._proactive_event,
                 event_delivered=self._event_prompted)
@@ -117,6 +139,8 @@ class Phase3Runtime(Star):
                 approval = json.loads(approval_path.read_text()) if approval_path.exists() else None
                 await self.memory.activate_runtime(approved_backlog=approval)
             if self.proactive_bridge:
+                if self.self_preferences:
+                    self.self_preferences.attach()
                 self.proactive.enabled = True
                 self.proactive_bridge.attach()
                 self.proactive_bridge.activate_native_config()
@@ -126,13 +150,57 @@ class Phase3Runtime(Star):
             if self.proactive_bridge:
                 self.proactive.enabled = False
                 self.proactive_bridge.detach()
+            if self.self_preferences:
+                self.self_preferences.detach()
             raise
         self.ready = True
+        if self.autonomy_state:
+            self._write_autonomy_readiness()
         if self.memory:
             task = asyncio.create_task(self._memory_worker())
             self.tasks.add(task)
             task.add_done_callback(self.tasks.discard)
             self.memory_wake.set()
+
+    def _write_autonomy_readiness(self):
+        """Private startup evidence, without identities, chat or credentials."""
+        bridge=self.proactive_bridge
+        try:
+            files=[Path(__file__),*Path(__file__).parent.glob('autonomy*.py')]
+            receipt={'schema':'phase3-autonomy-ready.v1','at':datetime.now(timezone.utc).isoformat(),
+                'pid':os.getpid(),'ready':self.ready,'bridge':type(bridge).__name__,
+                'tick_attached':getattr(bridge.private._tick_user,'__self__',None) is bridge,
+                'agent_attached':getattr(bridge.private._run_framework_agent_text,'__self__',None) is bridge,
+                'native_hooks':len(bridge.native_adapter.installed),
+                'self_preferences_attached':bool(self.self_preferences and self.self_preferences.attached),
+                'options':bridge.options,'sdk_meter_installation':'on_first_native_agent_build',
+                'source_hashes':{p.name:hashlib.sha256(p.read_bytes()).hexdigest() for p in files}}
+            path=StarTools.get_data_dir('phase3_runtime')/'autonomy-readiness.json'
+            temp=path.with_suffix('.tmp')
+            with os.fdopen(os.open(temp,os.O_WRONLY|os.O_CREAT|os.O_TRUNC,0o600),'w') as out:
+                json.dump(receipt,out,ensure_ascii=False)
+            os.replace(temp,path)
+        except Exception as exc:
+            logger.warning('Phase3 autonomy readiness evidence unavailable: %s',type(exc).__name__)
+
+    def _autonomy_search(self, scope, state, admit):
+        from ..phase3_search.proactive import ProactiveSearchContext, ProactiveSearchRuntime
+        from ..phase2_policy.redaction import configured_secrets
+        search = self._star('phase3_search').star_cls
+        def configuration():
+            return self.context.get_config(umo=scope['session'])
+        def ready():
+            cfg=configuration().get('provider_settings',{})
+            return (search.settings.get('enabled') is True and cfg.get('web_search') is True
+                    and cfg.get('websearch_provider')=='deepseek'
+                    and any(isinstance(k,str) and k.strip() for k in cfg.get('websearch_deepseek_key',[])))
+        context = ProactiveSearchContext(session=scope['session'],opportunity_id=scope['opportunity_id'],
+            evaluation_id=scope['evaluation_id'],started_at=scope['started_at'],deadline=scope['deadline'],
+            input_version=scope['input_version'])
+        return ProactiveSearchRuntime(scope=context,state=state,policy=search.public_policy,
+            allowed_session=self.proactive.session,config_context=self.context,admit=lambda _:admit(),
+            key_ready=ready,protected_values=lambda:tuple(configured_secrets(configuration())),
+            enabled=True,clock=self.proactive.clock)
 
     def _proactive_event(self, umo, event_id):
         ctx = self.memory.context_for_session(umo) if self.memory else None
@@ -179,6 +247,8 @@ class Phase3Runtime(Star):
                 pass
             self.memory_wake.clear()
             try:
+                if self.self_preferences:
+                    await self.self_preferences.drain(limit=32)
                 while self.ready:
                     count = await self.memory.drain_archive(self.guard.store, limit=32)
                     self.metrics["memory_observations"] += count
@@ -397,6 +467,16 @@ class Phase3Runtime(Star):
             self.memory.disable_runtime()
         if self.proactive_bridge:
             self.proactive_bridge.detach()
+            # The native scheduler owns active Agent tasks. Detaching revokes
+            # their scope; let its bounded monitor save progress before the
+            # shared ledger connection is closed below.
+            deadline=asyncio.get_running_loop().time()+8
+            while (getattr(self.proactive_bridge,'scopes',None)
+                   and asyncio.get_running_loop().time()<deadline):
+                await asyncio.sleep(.05)
+        if self.self_preferences:
+            self.self_preferences.detach()
+            self.self_preferences = None
         if self.guard:
             self.guard.unregister_delivery_observer(self.delivery_observed)
         for task in tuple(self.tasks):
@@ -406,7 +486,10 @@ class Phase3Runtime(Star):
             await self.memory.close()
             self.memory = None
         if self.proactive:
-            self.proactive.close()
+            if getattr(self.proactive_bridge,'scopes',None):
+                logger.warning('Phase3 autonomy shutdown pending; ledger kept open for settlement')
+            else:
+                self.proactive.close()
             self.proactive = None
         self.proactive_bridge = None
         self.tasks.clear()

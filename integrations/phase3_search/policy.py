@@ -145,7 +145,8 @@ class PublicPolicy:
         self.resolver = resolver
         self.scope = scope
 
-    def query(self, query: object, *, source_text=None, protected_values=()) -> str:
+    def query_payload(self, query: object, *, protected_values=()) -> str:
+        """Validate public payload only; the caller must separately authorize its execution context."""
         if not isinstance(query, str) or not 1 <= len(query.strip()) <= 128:
             raise Rejected("invalid_query")
         query = query.strip()
@@ -157,7 +158,6 @@ class PublicPolicy:
         if _private(decoded, protected_values):
             raise Rejected("private_query")
         if self.scope == "general_public":
-            _check_source(source_text)
             if not any(c.isalnum() for c in query):
                 raise Rejected("query_topic_missing")
             # No literal-word match, fixed synonym list or model-declared
@@ -179,6 +179,15 @@ class PublicPolicy:
         if not topic_found or remaining:
             raise Rejected("unreviewed_public_terms")
         return query
+
+    def query(self, query: object, *, source_text=None, protected_values=()) -> str:
+        # Passive authorization remains tied to the actual inbound authority.
+        # Active exploration calls query_payload only AFTER validating its own
+        # bound opportunity; it must not fabricate an incoming user message.
+        result = self.query_payload(query, protected_values=protected_values)
+        if self.scope == "general_public":
+            _check_source(source_text)
+        return result
 
     async def url(self, url: object, *, protected_values=()) -> str:
         if not isinstance(url, str) or not 1 <= len(url) <= 2048:
@@ -224,7 +233,16 @@ class PublicPolicy:
                     or _private(decoded_key, protected_values)
                     or _private(decoded_value, protected_values)):
                 raise Rejected("private_url")
-        if (decoded_host != host or any(ord(c) < 32 or c.isspace() for c in decoded_path)
+        # A public filename may contain ASCII spaces encoded once as %20.
+        # Keep the original URL bytes for Fetch. Literal whitespace was rejected
+        # above; repeated decoding must not introduce additional hidden spaces.
+        raw_path_spaces = len(re.findall(r"%20", parsed.path, re.I))
+        unsafe_path_whitespace = (
+            decoded_path.count(" ") != raw_path_spaces
+            or any(ord(c) < 32 or 127 <= ord(c) <= 159
+                   or (c.isspace() and c != " ") for c in decoded_path)
+        )
+        if (decoded_host != host or unsafe_path_whitespace
                 or any(c in decoded_path for c in "\\?#")
                 or host == "localhost" or host.endswith((".localhost", ".local", ".internal", ".home", ".lan"))):
             raise Rejected("unsafe_url")
