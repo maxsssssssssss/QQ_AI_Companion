@@ -314,9 +314,17 @@ def semantic_text(parser,text,*,enabled=True,fallback_enabled=False,allow_fallba
 class Pacing:
     minimum:float=2.0
     maximum:float=4.0
+    first_minimum:float=0.0
+    first_maximum:float=0.0
     def __post_init__(self):
         if not all(type(v) in (int,float) and math.isfinite(v) for v in (self.minimum,self.maximum)) or not 0<=self.minimum<=self.maximum<=4:
             raise ValueError('invalid_bubble_pacing')
+        if not all(type(v) in (int,float) and math.isfinite(v) for v in (self.first_minimum,self.first_maximum)) or not 0<=self.first_minimum<=self.first_maximum<=4:
+            raise ValueError('invalid_first_bubble_pacing')
+    def first_delay(self):
+        # Old configs remain immediate. A new plan draws only once, before its
+        # first transport call and outside DeliveryService's network timeout.
+        return random.uniform(self.first_minimum,self.first_maximum) if self.first_maximum else 0.0
     def delay(self,text):
         # Draw once for each later bubble, after the preceding send is confirmed.
         # Text length does not affect pacing; the existing wait remains interruptible.
@@ -342,8 +350,9 @@ async def send_sequence(store,*,turn_id,kind,texts,send_part,is_current,
     try:
         for i,text in enumerate(texts):
             if not is_current():reason='turn_cancelled';break
-            if i and not await wait_between(pacing.delay(text),is_current,sleep=sleep):
-                reason='interrupted_during_interval';break
+            delay=pacing.delay(text) if i else pacing.first_delay()
+            if delay and not await wait_between(delay,is_current,sleep=sleep):
+                reason='interrupted_during_interval' if i else 'interrupted_before_first';break
             outcome=await send_part(i,ids[i])
             store.finish_bubble(turn_id,kind,i,outcome.state)
             if outcome.state!='sent':reason='previous_part_unconfirmed';break

@@ -37,7 +37,9 @@ class Phase1Guard(Star):
         self.plain_text_enabled = config.get("phase3_plain_text_enabled", False) is True
         self.empty_recovery_enabled = config.get("phase3_empty_recovery_enabled", False) is True
         self.pacing = Pacing(float(config.get('phase3_bubble_min_interval',2.0)),
-                             float(config.get('phase3_bubble_max_interval',4.0)))
+                             float(config.get('phase3_bubble_max_interval',4.0)),
+                             first_minimum=config.get('phase3_first_bubble_min_delay',0.0),
+                             first_maximum=config.get('phase3_first_bubble_max_delay',0.0))
         self.stopping = False
         self._sending_tasks = set()
         self.phase3_admin_id = str(config.get("phase3_admin_id", ""))
@@ -62,6 +64,9 @@ class Phase1Guard(Star):
             if self.empty_recovery_enabled:
                 recovery.initialize(self.store.db)
             self.delivery = DeliveryService(self.store, timeout=self.timeout)
+            logger.info('Phase3 bubble pacing loaded: first=%s..%ss; later=%s..%ss; progress=immediate',
+                        self.pacing.first_minimum, self.pacing.first_maximum,
+                        self.pacing.minimum, self.pacing.maximum)
             self.turns = TurnCoordinator(
                 self.store, window=float(config.get("phase3_group_window", 0.8)),
                 max_wait=float(config.get("phase3_group_max_wait", 3.0)),

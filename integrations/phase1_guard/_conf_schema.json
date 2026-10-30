@@ -56,13 +56,23 @@
   },
   "phase3_bubble_min_interval": {
     "type": "float",
-    "description": "Lower bound of a fresh uniform random wait after each confirmed bubble. First bubble has no added wait.",
+    "description": "Lower bound of a fresh uniform random wait after each confirmed bubble. The first bubble uses its separate first-delay settings.",
     "default": 2.0
   },
   "phase3_bubble_max_interval": {
     "type": "float",
     "description": "Upper bound of the random inter-bubble wait (validated at most 4 seconds). Existing interruption and confirmation rules remain in effect.",
     "default": 4.0
+  },
+  "phase3_first_bubble_min_delay": {
+    "type": "float",
+    "description": "Lower bound of an interruptible random wait before the first bubble of each normal/final/proactive plan, including one-bubble replies. Search progress stays immediate. Both first-delay values at 0 disable this wait; old configs retain immediate first send.",
+    "default": 0.0
+  },
+  "phase3_first_bubble_max_delay": {
+    "type": "float",
+    "description": "Upper bound of first-bubble waiting, validated 0 <= min <= max <= 4 seconds. Wait happens outside the transport timeout; does not alter attempts, receipts or confirmed history. Approved release uses 0.8–1.8 seconds.",
+    "default": 0.0
   },
   "phase3_plain_text_enabled": {
     "type": "bool",
